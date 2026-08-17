@@ -9,9 +9,11 @@ import { ImageToolPolicy } from './tool-policy.ts'
 import type {
   ImageToolPreferences,
   ResponseApiPreferences,
+  UsageUiPreferences,
 } from './tool-policy.ts'
 import { readOpenAICodexRateLimits } from './usage.ts'
 import type { OpenAICodexUsage } from './usage.ts'
+import { CodexUsageTracker } from './usage-ledger.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -30,6 +32,7 @@ export interface OpenAICodexServiceOptions extends ImageToolPreferences, Respons
 export class OpenAICodexService {
   readonly credentials = new OpenAICodexCredentialStore()
   readonly policy: ImageToolPolicy
+  readonly usageTracker = new CodexUsageTracker()
 
   constructor(options: OpenAICodexServiceOptions) {
     this.policy = new ImageToolPolicy(options)
@@ -56,8 +59,10 @@ export class OpenAICodexService {
   }
 
   /** Read current subscription limits without issuing a model request. */
-  usage(): Promise<OpenAICodexUsage> {
-    return readOpenAICodexRateLimits(this.credentials)
+  async usage(): Promise<OpenAICodexUsage> {
+    const usage = await readOpenAICodexRateLimits(this.credentials)
+    await this.usageTracker.ledger.saveQuota(usage)
+    return usage
   }
 
   imagePreferences(): ImageToolPreferences {
@@ -74,6 +79,16 @@ export class OpenAICodexService {
 
   updateResponsePreferences(patch: Partial<ResponseApiPreferences>): Promise<ResponseApiPreferences> {
     return this.policy.updateResponseApi(patch)
+  }
+
+  usageUiPreferences(): UsageUiPreferences {
+    return this.policy.usageUiSnapshot()
+  }
+
+  async updateUsageUiPreferences(patch: Partial<UsageUiPreferences>): Promise<UsageUiPreferences> {
+    const next = await this.policy.updateUsageUi(patch)
+    this.usageTracker.refresh()
+    return next
   }
 }
 

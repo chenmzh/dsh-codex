@@ -1,6 +1,9 @@
 # dsh Codex
 
-[English](README.md) | 中文
+[English](README.md) | 中文 | [AI 部署契约](README.ai.md)
+
+> [!IMPORTANT]
+> 本仓库是 [Yan-Zero/dsh-codex](https://github.com/Yan-Zero/dsh-codex) 的公开增强 fork，依赖其上游代码，并保留相同的包名、provider ID、OAuth 存储和路由。请用本增强版**替代安装** upstream `dsh-codex`；不要在同一个 dsh profile 中同时安装两份。
 
 通过 OpenAI Codex 登录流程，在 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 中使用 ChatGPT 订阅：无需 OpenAI Platform API Key，也无需修改 dsh 源码。
 
@@ -13,21 +16,31 @@
 - 为 Harness 现有 `read_image` 工具增加可选的 HTTP(S) URL 输入
 - 由 `gpt-image-2` 执行的 `imagegen` 工具，支持工作区／会话参考图和自动工作区输出
 - 复用 dsh Web 输入框的粘贴和拖放图片能力
+- 持久化的 request-level SQLite Usage Ledger，由按 session 跟踪的周额度 HUD 与设置页 Analytics 共用
+- 全局时间／模型／Reasoning 筛选、按模型堆叠的趋势图、Task／Session 明细以及不含 Credit 的 JSON 报告
 
 ChatGPT 订阅认证与按量计费的 OpenAI API 是不同产品。本插件只使用 ChatGPT Codex 后端，不会把订阅转换成通用 OpenAI API 凭据。
 
 ## 安装
 
-从 npm 把预构建 bundle 安装到选定的 dsh profile：
+把预构建的 `v0.3.0` Release 包安装到选定的 dsh profile：
 
 ```sh
-dsh plugin --profile web add dsh-codex
+dsh plugin --profile web add https://github.com/chenmzh/dsh-codex/releases/download/v0.3.0/dsh-codex-0.3.0.tgz
 dsh web
 ```
 
-从 DeepSeek Harness 源码 checkout 运行时，使用 `pnpm dsh plugin --profile web add dsh-codex`。开发插件时仍可用 `link:/absolute/path/to/dsh-codex` 安装本地 checkout。
+这个 GitHub Release 是 Analytics 增强版的权威发行物。npm 上的 `dsh-codex@0.2.3` 是 upstream 基础版，不包含本 fork 完整的 Usage Ledger 与 Analytics UI。
 
-打开 **设置 → OpenAI Codex → 使用 ChatGPT 登录**。插件会打开 OpenAI 授权页面，并通过 localhost 回调完成登录。账号页面会显示实时 Codex 额度进度条与精确剩余百分比；只有账号接口提供信用余额或工作区限额时，才会一并显示精确数值。
+从 DeepSeek Harness 源码 checkout 运行时，在同一条命令前加 `pnpm`：
+
+```sh
+pnpm dsh plugin --profile web add https://github.com/chenmzh/dsh-codex/releases/download/v0.3.0/dsh-codex-0.3.0.tgz
+```
+
+本地 checkout 可先运行 `pnpm install && pnpm run build`，再用 `link:/absolute/path/to/dsh-codex` 安装。
+
+打开 **设置 → OpenAI Codex → 使用 ChatGPT 登录**。插件会打开 OpenAI 授权页面，并通过 localhost 回调完成登录。账号页面只按 OpenAI 服务端实际返回的精度显示 Codex 额度进度；不会反推 Credit denominator，也不会显示拿不到的 Credit 值。
 
 终端和无界面环境仍可使用 CLI：
 
@@ -41,14 +54,22 @@ dsh plugin --profile web exec dsh-openai-codex logout
 在 `dsh-tui` 中使用时，把 bundle 安装到同一个 profile：
 
 ```sh
-dsh plugin --profile dsh-tui add dsh-codex
+dsh plugin --profile dsh-tui add https://github.com/chenmzh/dsh-codex/releases/download/v0.3.0/dsh-codex-0.3.0.tgz
 ```
 
-重新启动 TUI 后，`/model` 会列出 `openai-codex` 的模型；没有显式模型配置或已保存选择时，TUI 会采用 bundle 注册的 `gpt-5.6-sol`。`/codex status|login|logout|usage|config` 用于管理账号与查看配置，四个布尔开关可通过 `/codex set <read-image|imagegen-other-models|websocket-context|native-compaction> <on|off>` 修改。浏览器登录完成后，凭据与 Web profile 共用同一份 dsh 凭据文件。
+重新启动 TUI 后，`/model` 会列出 `openai-codex` 的模型；没有显式模型配置或已保存选择时，TUI 会采用 bundle 注册的 `gpt-5.6-sol`。`/codex status|login|logout|usage|config` 用于管理账号与查看配置，四个布尔开关可通过 `/codex set <read-image|imagegen-other-models|websocket-context|native-compaction> <on|off>` 修改，推理摘要详细度则使用 `/codex set reasoning-summary <auto|concise|detailed>`。浏览器登录完成后，凭据与 Web profile 共用同一份 dsh 凭据文件。
 
-Codex、Claude Code 及其他自动化 agent 应直接遵循 [INSTALL.md](INSTALL.md)。它是一份完整且可重复执行的 runbook，不要求安装者阅读源码或设计文档。
+Codex、Claude Code 及其他自动化 agent 应直接遵循 [README.ai.md](README.ai.md)。它是紧凑、可重复执行的部署契约，不要求读取源码或设计文档。
 
 bundle 会为新建 agent 选择 `openai-codex` / `gpt-5.6-sol`，并选择 Codex 搜索提供方。dsh settings 中已经保存的模型仍然优先；模型选择器可以切换到当前账号可用的其他 Codex 模型。
+
+## 推理摘要
+
+OpenAI 不会公开模型私有的原始 reasoning tokens。模型支持时，本插件会把提供方生成的推理摘要流式写入 dsh 可折叠的 **Think** 区块。你可以选择 **设置 → OpenAI Codex → 推理摘要 → 详细**，或在 profile 的 `llm-openai-codex` 配置中设置 `reasoningSummary: detailed`，请求尽可能明确的解释。具体返回内容仍由提供方决定，因此 `detailed` 也可能很短，且不能据此还原隐藏思维链。`auto` 是兼容性默认值，目前会选择该模型可用的最详细摘要器。
+
+## WebSocket 恢复
+
+**设置 → OpenAI Codex → WebSocket 上下文复用** 是实时配置：保存后，新请求会在开启时使用 WebSocket、关闭时使用 SSE，通常无需重启。缓存 WebSocket 异常关闭时，插件会把它标记为可恢复的传输失败；dsh 从失败的持久 agent step 边界发起重试，同时 pi-ai 废弃该连接并让重试走 SSE。之前步骤已经完成的工具调用会保留，不会再次执行。
 
 ## 图片
 

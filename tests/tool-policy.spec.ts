@@ -38,21 +38,26 @@ describe('ImageToolPolicy', () => {
       shareImagegenWithOtherModels: true,
     })
     expect(policy.responseApiSnapshot()).toEqual({
+      reasoningSummary: 'auto',
       useWebSocketContextReuse: false,
       useNativeCompaction: false,
     })
+    expect(policy.usageUiSnapshot()).toEqual({ showUsageHud: true, pinUsageHud: false })
 
     await policy.update({ shareImagegenWithOtherModels: false })
-    await policy.updateResponseApi({ useNativeCompaction: true })
+    await policy.updateResponseApi({ reasoningSummary: 'detailed', useNativeCompaction: true })
+    await policy.updateUsageUi({ showUsageHud: false, pinUsageHud: true })
 
     expect(policy.snapshot()).toEqual({
       modifyReadImage: true,
       shareImagegenWithOtherModels: false,
     })
     expect(policy.responseApiSnapshot()).toEqual({
+      reasoningSummary: 'detailed',
       useWebSocketContextReuse: false,
       useNativeCompaction: true,
     })
+    expect(policy.usageUiSnapshot()).toEqual({ showUsageHud: false, pinUsageHud: true })
   })
 
   it('notifies the read_image enhancer when its live setting changes', async () => {
@@ -77,6 +82,7 @@ describe('ImageToolPolicy', () => {
     const policy = new ImageToolPolicy({ useStatefulResponses: true })
 
     expect(policy.responseApiSnapshot()).toEqual({
+      reasoningSummary: 'auto',
       useWebSocketContextReuse: true,
       useNativeCompaction: false,
     })

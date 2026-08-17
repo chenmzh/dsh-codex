@@ -12,12 +12,22 @@ export interface ImageToolPreferences {
 }
 
 /** Experimental request behavior used only by the OpenAI Codex adapter. */
+export const OPENAI_CODEX_REASONING_SUMMARIES = ['auto', 'concise', 'detailed'] as const
+export type OpenAICodexReasoningSummary = typeof OPENAI_CODEX_REASONING_SUMMARIES[number]
+
 export interface ResponseApiPreferences {
+  reasoningSummary: OpenAICodexReasoningSummary
   useWebSocketContextReuse: boolean
   useNativeCompaction: boolean
 }
 
-interface OpenAICodexPreferences extends ImageToolPreferences, ResponseApiPreferences {
+/** Browser presentation preferences shared by UI controls and /codex commands. */
+export interface UsageUiPreferences {
+  showUsageHud: boolean
+  pinUsageHud: boolean
+}
+
+interface OpenAICodexPreferences extends ImageToolPreferences, ResponseApiPreferences, UsageUiPreferences {
   /** Migration-only key written by the unreleased store:true experiment. */
   useStatefulResponses: boolean
 }
@@ -30,17 +40,26 @@ export const DEFAULT_IMAGE_TOOL_PREFERENCES: ImageToolPreferences = {
 
 /** Conservative defaults preserve the established stateless Harness behavior. */
 export const DEFAULT_RESPONSE_API_PREFERENCES: ResponseApiPreferences = {
+  reasoningSummary: 'auto',
   useWebSocketContextReuse: false,
   useNativeCompaction: false,
+}
+
+export const DEFAULT_USAGE_UI_PREFERENCES: UsageUiPreferences = {
+  showUsageHud: true,
+  pinUsageHud: false,
 }
 
 const NAMESPACE = settingsNamespace('openai-codex')
 const schema: z<OpenAICodexPreferences> = z.object({
   modifyReadImage: z.boolean().default(true),
   shareImagegenWithOtherModels: z.boolean().default(true),
+  reasoningSummary: z.union(OPENAI_CODEX_REASONING_SUMMARIES).default('auto'),
   useWebSocketContextReuse: z.boolean().default(false),
   useStatefulResponses: z.boolean().default(false),
   useNativeCompaction: z.boolean().default(false),
+  showUsageHud: z.boolean().default(true),
+  pinUsageHud: z.boolean().default(false),
 })
 
 /** Live policy shared by the host tools, Codex adapter, and settings HTTP surface. */
@@ -53,6 +72,7 @@ export class ImageToolPolicy {
     this.current = {
       ...DEFAULT_IMAGE_TOOL_PREFERENCES,
       ...DEFAULT_RESPONSE_API_PREFERENCES,
+      ...DEFAULT_USAGE_UI_PREFERENCES,
       useStatefulResponses: false,
       ...base,
     }
@@ -98,6 +118,7 @@ export class ImageToolPolicy {
   /** Return the current Codex-only Responses API experiments. */
   responseApiSnapshot(): ResponseApiPreferences {
     return {
+      reasoningSummary: this.current.reasoningSummary,
       useWebSocketContextReuse: this.current.useWebSocketContextReuse,
       useNativeCompaction: this.current.useNativeCompaction,
     }
@@ -112,6 +133,17 @@ export class ImageToolPolicy {
     })
     this.replace(this.scope.get())
     return this.responseApiSnapshot()
+  }
+
+  usageUiSnapshot(): UsageUiPreferences {
+    return { showUsageHud: this.current.showUsageHud, pinUsageHud: this.current.pinUsageHud }
+  }
+
+  async updateUsageUi(patch: Partial<UsageUiPreferences>): Promise<UsageUiPreferences> {
+    if (this.scope === undefined) throw new Error('OpenAI Codex settings service is unavailable')
+    await this.scope.update(patch)
+    this.replace(this.scope.get())
+    return this.usageUiSnapshot()
   }
 
   /** Enforce imagegen's cross-provider toggle at execution time. */

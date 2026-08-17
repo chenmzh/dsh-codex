@@ -1,8 +1,8 @@
 /** OpenAI Codex adapter assembled from public dsh-llm-pi-ai extension points. */
 
+import { randomUUID } from 'node:crypto'
 import { createModels } from '@earendil-works/pi-ai'
 import type { MutableModels, Provider } from '@earendil-works/pi-ai'
-import { openaiCodexProvider } from '@earendil-works/pi-ai/providers/openai-codex'
 import { resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
@@ -12,6 +12,8 @@ import type { OpenAICodexCredentialStore } from './store.ts'
 import { OPENAI_CODEX_PROVIDER } from './store.ts'
 import { OpenAICodexResponseRuntime } from './responses.ts'
 import type { ResponseApiPreferences } from './tool-policy.ts'
+import { createOpenAICodexProvider } from './provider.ts'
+import type { CodexUsageTracker } from './usage-ledger.ts'
 
 /** Provider idle ceiling used by the composite route. */
 export const OPENAI_CODEX_STREAM_IDLE_TIMEOUT_MS = 300_000
@@ -45,6 +47,7 @@ class OpenAICodexAdapter extends PiAiAdapter {
   constructor(
     options: ConstructorParameters<typeof PiAiAdapter>[0],
     private readonly responses: OpenAICodexResponseRuntime,
+    private readonly usageTracker: CodexUsageTracker,
   ) {
     super(options)
   }
@@ -53,8 +56,34 @@ class OpenAICodexAdapter extends PiAiAdapter {
     const release = options.purpose === 'compaction'
       ? this.responses.enterCompaction(options.sessionId === undefined ? undefined : String(options.sessionId))
       : undefined
+    const requestId = randomUUID()
+    const requestStartedAt = Date.now()
+    let usageRecorded = false
     try {
-      for await (const chunk of super.stream(options)) yield chunk
+      for await (const chunk of super.stream(options)) {
+        if (chunk.type === 'usage' && !usageRecorded) {
+          usageRecorded = true
+          const sessionId = options.sessionId === undefined ? undefined : String(options.sessionId)
+          const providerUsage = chunk.usage as typeof chunk.usage & { serverCredits?: unknown; credits?: unknown }
+          const directCredits = typeof providerUsage.serverCredits === 'number'
+            ? providerUsage.serverCredits
+            : typeof providerUsage.credits === 'number' ? providerUsage.credits : undefined
+          await this.usageTracker.record({
+            requestId,
+            durationMs: Date.now() - requestStartedAt,
+            correlation: this.usageTracker.correlation(sessionId, requestId, options.purpose),
+            model: options.model,
+            ...options.reasoningEffort === undefined ? {} : { reasoningEffort: String(options.reasoningEffort) },
+            ...directCredits === undefined || !Number.isFinite(directCredits) || directCredits < 0
+              ? {}
+              : { serverCredits: directCredits },
+            usage: chunk.usage,
+          }).catch((error: unknown) => {
+            process.emitWarning(`dsh-openai-codex: failed to persist usage: ${error instanceof Error ? error.message : String(error)}`)
+          })
+        }
+        yield chunk
+      }
     } finally {
       release?.()
     }
@@ -71,8 +100,9 @@ export function createOpenAICodexAdapter(
   credentials: OpenAICodexCredentialStore,
   resolveAttachments: () => AttachmentStore | undefined,
   responsePreferences: () => ResponseApiPreferences,
+  usageTracker: CodexUsageTracker,
 ): PiAiAdapter {
-  const provider = openaiCodexProvider()
+  const provider = createOpenAICodexProvider()
   const responses = new OpenAICodexResponseRuntime(responsePreferences)
   const profiles = new Map<string, ResolvedPiAiProviderProfile>([[OPENAI_CODEX_PROVIDER, {
     provider: OPENAI_CODEX_PROVIDER,
@@ -88,5 +118,5 @@ export function createOpenAICodexAdapter(
     profiles: () => profiles,
     resolveApiKey: async () => (await models.getAuth(OPENAI_CODEX_PROVIDER))?.auth.apiKey,
     resolveAttachments,
-  }, responses)
+  }, responses, usageTracker)
 }

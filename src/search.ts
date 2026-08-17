@@ -5,7 +5,6 @@
 
 import { createModels } from '@earendil-works/pi-ai'
 import type { Models } from '@earendil-works/pi-ai'
-import { openaiCodexProvider } from '@earendil-works/pi-ai/providers/openai-codex'
 import { WebError } from '@deepseek-ai/dsh-web'
 import type {
   WebSearchProvider,
@@ -15,6 +14,7 @@ import type {
 } from '@deepseek-ai/dsh-web'
 import type { OpenAICodexCredentialStore } from './store.ts'
 import { OPENAI_CODEX_PROVIDER } from './store.ts'
+import { createOpenAICodexProvider } from './provider.ts'
 
 /** Stable dsh web-provider id selected by the bundle patch. */
 export const OPENAI_CODEX_SEARCH_PROVIDER = OPENAI_CODEX_PROVIDER
@@ -232,7 +232,7 @@ export class OpenAICodexSearchProvider implements WebSearchProvider {
    */
   constructor(private readonly options: OpenAICodexSearchProviderOptions) {
     const models = createModels({ credentials: options.credentials })
-    models.setProvider(openaiCodexProvider())
+    models.setProvider(createOpenAICodexProvider())
     this.models = models
   }
 

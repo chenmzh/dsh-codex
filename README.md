@@ -1,8 +1,11 @@
 # dsh Codex
 
-English | [中文](README.zh.md)
+English | [中文](README.zh.md) | [AI deployment contract](README.ai.md)
 
-Use a ChatGPT subscription in [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) through OpenAI's Codex sign-in flow—no OpenAI Platform API key required and no dsh source patch required.
+> [!IMPORTANT]
+> This repository is an enhanced public fork of [Yan-Zero/dsh-codex](https://github.com/Yan-Zero/dsh-codex). It depends on that upstream codebase and keeps the same package name, provider ID, OAuth storage, and routes. Install this build **instead of** upstream `dsh-codex`; never install both in one dsh profile.
+
+Use a ChatGPT subscription in [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) through OpenAI's Codex sign-in flow—no OpenAI Platform API key or dsh source patch required.
 
 `dsh-codex` is an independent dsh bundle. It adds:
 
@@ -13,21 +16,31 @@ Use a ChatGPT subscription in [DeepSeek Harness](https://github.com/deepseek-ai/
 - optional HTTP(S) URL input added to Harness's existing `read_image` tool
 - an `imagegen` tool backed by `gpt-image-2`, with workspace or conversation reference images and automatic workspace output
 - browser image input through dsh's existing paste and drop controls
+- a persistent, request-level SQLite usage ledger shared by the session-aware weekly HUD and Settings analytics panel
+- global time/model/reasoning filters, model-stacked usage charts, task/session drill-down, and credit-free JSON reports
 
 ChatGPT subscription authentication and usage-based OpenAI API access are different products. This plugin uses the ChatGPT Codex backend only; it does not turn a subscription into a general-purpose OpenAI API credential.
 
 ## Install
 
-Install the prebuilt bundle from npm into the selected dsh profile:
+Install the prebuilt `v0.3.0` release archive into the selected dsh profile:
 
 ```sh
-dsh plugin --profile web add dsh-codex
+dsh plugin --profile web add https://github.com/chenmzh/dsh-codex/releases/download/v0.3.0/dsh-codex-0.3.0.tgz
 dsh web
 ```
 
-From a DeepSeek Harness source checkout, use `pnpm dsh plugin --profile web add dsh-codex`. A local plugin checkout can still be installed with `link:/absolute/path/to/dsh-codex` for development.
+This GitHub release is the authoritative Analytics build. The npm package `dsh-codex@0.2.3` is the upstream base and does not contain this fork's complete Usage Ledger and Analytics UI.
 
-Open **Settings → OpenAI Codex → Sign in with ChatGPT**. The plugin opens OpenAI's authorization page and completes the localhost callback. The account page shows live Codex quota bars and exact remaining percentages; exact credit balances or workspace limits appear only when the account API supplies them.
+From a DeepSeek Harness source checkout, prefix the same command with `pnpm`:
+
+```sh
+pnpm dsh plugin --profile web add https://github.com/chenmzh/dsh-codex/releases/download/v0.3.0/dsh-codex-0.3.0.tgz
+```
+
+A local checkout can be built with `pnpm install && pnpm run build` and installed using `link:/absolute/path/to/dsh-codex`.
+
+Open **Settings → OpenAI Codex → Sign in with ChatGPT**. The plugin opens OpenAI's authorization page and completes the localhost callback. The account page shows live Codex quota bars at exactly the precision returned by OpenAI. The UI does not invent a credit denominator or display unavailable credit values.
 
 The CLI remains available for terminal and headless installations:
 
@@ -41,14 +54,22 @@ dsh plugin --profile web exec dsh-openai-codex logout
 For `dsh-tui`, install the bundle into the same profile:
 
 ```sh
-dsh plugin --profile dsh-tui add dsh-codex
+dsh plugin --profile dsh-tui add https://github.com/chenmzh/dsh-codex/releases/download/v0.3.0/dsh-codex-0.3.0.tgz
 ```
 
-After restarting the TUI, `/model` lists the `openai-codex` catalog. With no explicit route or saved selection, the TUI adopts the bundle's `gpt-5.6-sol` default. Use `/codex status|login|logout|usage|config` for the account and live settings; the four boolean settings can be changed with `/codex set <read-image|imagegen-other-models|websocket-context|native-compaction> <on|off>`. Browser login shares the same dsh credential file used by the Web profile.
+After restarting the TUI, `/model` lists the `openai-codex` catalog. With no explicit route or saved selection, the TUI adopts the bundle's `gpt-5.6-sol` default. Use `/codex status|login|logout|usage|config` for the account and live settings; the four boolean settings can be changed with `/codex set <read-image|imagegen-other-models|websocket-context|native-compaction> <on|off>`, and reasoning summary detail with `/codex set reasoning-summary <auto|concise|detailed>`. Browser login shares the same dsh credential file used by the Web profile.
 
-Codex, Claude Code, and other automation agents should follow [INSTALL.md](INSTALL.md). It is a complete, idempotent runbook and does not require reading this repository's source or design notes.
+Codex, Claude Code, and other automation agents should follow [README.ai.md](README.ai.md). It is the compact, idempotent deployment contract and does not require reading source or design notes.
 
 The bundle selects `openai-codex` / `gpt-5.6-sol` for new agents and selects the Codex search provider. A model already saved in dsh settings still takes precedence; the model picker can select any other Codex model visible to the signed-in account.
+
+## Reasoning summaries
+
+OpenAI does not expose a model's private raw reasoning tokens. When the model supports it, this plugin streams the provider-authored reasoning summary into dsh's collapsible **Think** block. Select **Settings → OpenAI Codex → Reasoning summary → Detailed**, or configure `reasoningSummary: detailed` on the `llm-openai-codex` profile row, to request the most explicit available explanation. The provider decides the returned content, so `detailed` can still be brief and cannot be used to reconstruct hidden chain-of-thought. `auto` remains the compatibility default and currently selects the most detailed summarizer available to the model.
+
+## WebSocket recovery
+
+**Settings → OpenAI Codex → WebSocket context reuse** is a live preference: after saving, new requests use WebSocket when enabled and SSE when disabled, normally without a restart. A cached WebSocket that closes abnormally is reported as a recoverable transport failure. dsh retries from the failed durable agent-step boundary, while pi-ai retires that connection and sends the retry through SSE. Tool calls completed in earlier steps are retained rather than executed again.
 
 ## Images
 

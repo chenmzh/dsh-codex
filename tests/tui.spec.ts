@@ -14,7 +14,9 @@ afterEach(async () => {
 
 function fakeService(): OpenAICodexService {
   let imagePreferences = { modifyReadImage: true, shareImagegenWithOtherModels: true }
-  let responsePreferences = { useWebSocketContextReuse: false, useNativeCompaction: false }
+  let responsePreferences = { reasoningSummary: 'auto' as const, useWebSocketContextReuse: false, useNativeCompaction: false }
+  let showUsageHud = true
+  let pinUsageHud = false
   return {
     authStatus: vi.fn(async () => ({ authenticated: true, expiresAt: new Date('2026-08-17T00:00:00Z') })),
     usage: vi.fn(async () => ({
@@ -35,6 +37,12 @@ function fakeService(): OpenAICodexService {
     updateResponsePreferences: vi.fn(async patch => {
       responsePreferences = { ...responsePreferences, ...patch }
       return { ...responsePreferences }
+    }),
+    usageUiPreferences: vi.fn(() => ({ showUsageHud, pinUsageHud })),
+    updateUsageUiPreferences: vi.fn(async patch => {
+      showUsageHud = patch.showUsageHud ?? showUsageHud
+      pinUsageHud = patch.pinUsageHud ?? pinUsageHud
+      return { showUsageHud, pinUsageHud }
     }),
   } as unknown as OpenAICodexService
 }
@@ -84,15 +92,19 @@ describe('UI-neutral command with optional dsh-tui completion', () => {
     if (commandTree === undefined) throw new Error('Codex command tree was not registered')
     expect(commandTree.descriptions?.zh).toBe('管理 OpenAI Codex 账号与提供方设置')
     expect(commandTree.children(['codex']).map(item => item.name)).toEqual([
-      'status', 'login', 'logout', 'usage', 'config', 'set',
+      'status', 'login', 'logout', 'usage', 'hud', 'config', 'set',
     ])
     expect(commandTree.children(['codex'])[0]).toMatchObject({
       descriptions: { en: 'Show the ChatGPT sign-in state', zh: '查看 ChatGPT 登录状态' },
     })
+    expect(commandTree.children(['codex', 'hud']).map(item => item.name)).toEqual(['on', 'off', 'toggle', 'pin', 'unpin', 'status'])
     expect(commandTree.children(['codex', 'set']).map(item => item.name)).toEqual([
-      'read-image', 'imagegen-other-models', 'websocket-context', 'native-compaction',
+      'read-image', 'imagegen-other-models', 'reasoning-summary', 'websocket-context', 'native-compaction',
     ])
     expect(commandTree.children(['codex', 'set', 'native-compaction']).map(item => item.name)).toEqual(['on', 'off'])
+    expect(commandTree.children(['codex', 'set', 'reasoning-summary']).map(item => item.name)).toEqual([
+      'auto', 'concise', 'detailed',
+    ])
     await expect(definition.handler({ rawInput: ' status' } as never)).resolves.toEqual({
       kind: 'success',
       text: 'OpenAI Codex is signed in. Access token expires 2026-08-17T00:00:00.000Z; refresh is automatic.',
@@ -110,6 +122,17 @@ describe('UI-neutral command with optional dsh-tui completion', () => {
       text: expect.stringContaining('native-compaction: on'),
     })
     expect(service.updateResponsePreferences).toHaveBeenCalledWith({ useNativeCompaction: true })
+    await expect(definition.handler({ rawInput: ' set reasoning-summary detailed' } as never)).resolves.toMatchObject({
+      kind: 'success',
+      text: expect.stringContaining('reasoning-summary: detailed'),
+    })
+    expect(service.updateResponsePreferences).toHaveBeenCalledWith({ reasoningSummary: 'detailed' })
+    await expect(definition.handler({ rawInput: ' hud off' } as never)).resolves.toEqual({ kind: 'success', text: 'Codex usage HUD: off (compact)' })
+    expect(service.updateUsageUiPreferences).toHaveBeenCalledWith({ showUsageHud: false })
+    await expect(definition.handler({ rawInput: ' hud toggle' } as never)).resolves.toEqual({ kind: 'success', text: 'Codex usage HUD: on (compact)' })
+    await expect(definition.handler({ rawInput: ' hud pin' } as never)).resolves.toEqual({ kind: 'success', text: 'Codex usage HUD: on (pinned)' })
+    expect(service.updateUsageUiPreferences).toHaveBeenCalledWith({ pinUsageHud: true })
+    await expect(definition.handler({ rawInput: ' hud status' } as never)).resolves.toEqual({ kind: 'success', text: 'Codex usage HUD: on (pinned)' })
     expect(ctx.get('openAICodexTui')).toEqual({})
   })
 })

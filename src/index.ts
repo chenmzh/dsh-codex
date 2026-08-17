@@ -16,6 +16,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-fs'
 import { createOpenAICodexAdapter } from './adapter.ts'
 import { registerOpenAICodexAuthRoutes } from './auth-routes.ts'
+import { registerOpenAICodexUsageRoutes } from './usage-routes.ts'
 import { installReadImageEnhancement } from './read-image-enhancement.ts'
 import { imagegenTool } from './imagegen.ts'
 import { ImageToolPolicy } from './tool-policy.ts'
@@ -36,8 +37,13 @@ export {
   DEFAULT_IMAGE_TOOL_PREFERENCES,
   DEFAULT_RESPONSE_API_PREFERENCES,
   ImageToolPolicy,
+  OPENAI_CODEX_REASONING_SUMMARIES,
 } from './tool-policy.ts'
-export type { ImageToolPreferences, ResponseApiPreferences } from './tool-policy.ts'
+export type {
+  ImageToolPreferences,
+  OpenAICodexReasoningSummary,
+  ResponseApiPreferences,
+} from './tool-policy.ts'
 export { OPENAI_CODEX_USAGE_URL, parseOpenAICodexUsage, readOpenAICodexRateLimits } from './usage.ts'
 export type {
   OpenAICodexCredits,
@@ -61,8 +67,31 @@ import {
 import type { OpenAICodexSearchContextSize, OpenAICodexSearchMode } from './search.ts'
 import { OpenAICodexCredentialStore, OPENAI_CODEX_PROVIDER } from './store.ts'
 import { OpenAICodexService } from './service.ts'
+import { OPENAI_CODEX_REASONING_SUMMARIES } from './tool-policy.ts'
+import type { OpenAICodexReasoningSummary } from './tool-policy.ts'
 
 export { OpenAICodexService } from './service.ts'
+export {
+  classifyCodexModel,
+  CodexUsageLedger,
+  CodexUsageTracker,
+  OPENAI_CODEX_USAGE_DB_FILENAME,
+  openAICodexUsageDbPath,
+} from './usage-ledger.ts'
+export type {
+  CodexModelFamily,
+  CodexUsageEvent,
+  CreditRate,
+  CreditSource,
+  QuotaSnapshot,
+  SessionUsage,
+  TaskDetail,
+  TaskUsage,
+  UsageBreakdownRow,
+  UsageFilters,
+  UsageTimePoint,
+  UsageTotals,
+} from './usage-ledger.ts'
 export type { OpenAICodexServiceOptions } from './service.ts'
 
 export { loginOpenAICodex, logoutOpenAICodex, openAICodexAuthStatus } from './auth.ts'
@@ -111,6 +140,8 @@ export interface Config {
   modifyReadImage?: boolean
   /** Allow non-Codex vision models to call imagegen. */
   shareImagegenWithOtherModels?: boolean
+  /** Request a provider-authored reasoning summary; raw private reasoning is unavailable. */
+  reasoningSummary?: OpenAICodexReasoningSummary
   /** Reuse matching Codex context through the session's WebSocket connection. */
   useWebSocketContextReuse?: boolean
   /** Use Codex V2 Responses compaction for Harness compaction calls. */
@@ -124,6 +155,7 @@ export const Config: z<Config> = z.object({
   searchMaxOutputTokens: z.number().step(1).min(1).default(DEFAULT_OPENAI_CODEX_SEARCH_MAX_OUTPUT_TOKENS),
   modifyReadImage: z.boolean().default(true),
   shareImagegenWithOtherModels: z.boolean().default(true),
+  reasoningSummary: z.union(OPENAI_CODEX_REASONING_SUMMARIES).default('auto'),
   useWebSocketContextReuse: z.boolean().default(false),
   useNativeCompaction: z.boolean().default(false),
 })
@@ -139,11 +171,13 @@ export function apply(ctx: Context, config: Config): void {
   const service = new OpenAICodexService({
     modifyReadImage: config.modifyReadImage ?? true,
     shareImagegenWithOtherModels: config.shareImagegenWithOtherModels ?? true,
+    reasoningSummary: config.reasoningSummary ?? 'auto',
     useWebSocketContextReuse: config.useWebSocketContextReuse ?? false,
     useNativeCompaction: config.useNativeCompaction ?? false,
   })
   const credentials = service.credentials
   const imageTools = service.policy
+  const usageTracker = service.usageTracker
   ctx.provide('openAICodex', service)
   ctx.inject(['settings'], settingsCtx => { service.attachSettings(settingsCtx) })
   ctx.llm.registerAdapter(
@@ -152,6 +186,7 @@ export function apply(ctx: Context, config: Config): void {
       credentials,
       () => ctx.get('attachments'),
       () => imageTools.responseApiSnapshot(),
+      usageTracker,
     ),
   )
   ctx.web.registerSearchProvider(new OpenAICodexSearchProvider({
@@ -163,11 +198,26 @@ export function apply(ctx: Context, config: Config): void {
     resolveRequestId: () => String(ctx.get('agents')?.currentInitiator()?.session.id ?? randomUUID()),
     recordRequest: request => { recordOpenAICodexSearchRequest(ctx, request) },
   }))
-  ctx.inject(['webServer'], webCtx => registerOpenAICodexAuthRoutes(webCtx, credentials, imageTools))
+  ctx.inject(['webServer'], webCtx => {
+    registerOpenAICodexAuthRoutes(webCtx, credentials, imageTools)
+    registerOpenAICodexUsageRoutes(webCtx, service)
+  })
+  ctx.inject(['agents'], agentCtx => {
+    agentCtx.on('agent/pre-step', async (payload, next) => {
+      const decision = await next()
+      if (decision.kind === 'enter') usageTracker.noteStep(String(payload.agent.id), payload.turn, payload.step)
+      return decision
+    })
+    agentCtx.on('agent/turn-stopping', payload => {
+      usageTracker.finishTask(String(payload.agent.id), payload.turn)
+      void service.usage().catch(() => undefined)
+    })
+  })
   ctx.inject(['tools', 'fs', 'attachments'], toolCtx => {
     toolCtx.tools.register(imagegenTool(toolCtx, credentials, imageTools))
   })
   ctx.inject(['tools', 'fs', 'attachments', 'agents'], toolCtx => {
     installReadImageEnhancement(toolCtx, imageTools)
   })
+  ctx.effect(() => () => usageTracker.ledger.close(), 'dsh-openai-codex: close usage ledger')
 }

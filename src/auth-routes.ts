@@ -6,6 +6,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { loginOpenAICodex, logoutOpenAICodex, openAICodexAuthStatus } from './auth.ts'
 import type { OpenAICodexCredentialStore } from './store.ts'
+import { OPENAI_CODEX_REASONING_SUMMARIES } from './tool-policy.ts'
 import type { ImageToolPolicy, ImageToolPreferences, ResponseApiPreferences } from './tool-policy.ts'
 import { readOpenAICodexRateLimits } from './usage.ts'
 import type { OpenAICodexUsage } from './usage.ts'
@@ -202,15 +203,27 @@ function preferencePatch(value: Record<string, unknown>): Partial<ImageToolPrefe
 }
 
 function responseApiPatch(value: Record<string, unknown>): Partial<ResponseApiPreferences> {
-  const allowed = new Set<keyof ResponseApiPreferences>(['useWebSocketContextReuse', 'useNativeCompaction'])
+  const allowed = new Set<keyof ResponseApiPreferences>([
+    'reasoningSummary',
+    'useWebSocketContextReuse',
+    'useNativeCompaction',
+  ])
   if (Object.keys(value).some(key => !allowed.has(key as keyof ResponseApiPreferences))) {
     throw new Error('request contains an unknown Responses API setting')
   }
   const patch: Partial<ResponseApiPreferences> = {}
   for (const key of allowed) {
     if (value[key] === undefined) continue
+    if (key === 'reasoningSummary') {
+      if (!OPENAI_CODEX_REASONING_SUMMARIES.includes(value[key] as never)) {
+        throw new Error('reasoningSummary must be auto, concise, or detailed')
+      }
+      patch.reasoningSummary = value[key] as ResponseApiPreferences['reasoningSummary']
+      continue
+    }
     if (typeof value[key] !== 'boolean') throw new Error(`${key} must be a boolean`)
-    patch[key] = value[key]
+    if (key === 'useWebSocketContextReuse') patch.useWebSocketContextReuse = value[key]
+    else patch.useNativeCompaction = value[key]
   }
   return patch
 }

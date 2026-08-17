@@ -5,6 +5,7 @@ import {
 } from '@earendil-works/pi-ai'
 import type {
   AssistantMessage,
+  AssistantMessageEvent,
   AssistantMessageEventStream,
   Api,
   Context as PiContext,
@@ -191,6 +192,35 @@ function failedStream(model: Model<Api>, error: unknown, signal?: AbortSignal): 
   return stream
 }
 
+/**
+ * Keep released dsh hosts compatible with pi-ai's numeric WebSocket close text.
+ *
+ * pi-ai has already retired the failed cached connection before emitting this
+ * event. Adding the transport word lets dsh's durable-step retry classifier
+ * recognize the failure and retry through pi-ai's recorded SSE fallback.
+ */
+function normalizeWebSocketCloseEvent(event: AssistantMessageEvent): AssistantMessageEvent {
+  if (event.type !== 'error') return event
+  const message = event.error.errorMessage
+  if (message === undefined || !/^WebSocket closed(?:\s|$)/i.test(message)) return event
+  return {
+    ...event,
+    error: {
+      ...event.error,
+      errorMessage: message.replace(/^WebSocket closed/i, 'WebSocket connection closed'),
+    },
+  }
+}
+
+function normalizeTransportErrors(source: AssistantMessageEventStream): AssistantMessageEventStream {
+  const target = createAssistantMessageEventStream()
+  void (async () => {
+    for await (const event of source) target.push(normalizeWebSocketCloseEvent(event))
+    target.end()
+  })()
+  return target
+}
+
 function responseHeaders(headers: Headers): Record<string, string> {
   const result: Record<string, string> = {}
   headers.forEach((value, key) => { result[key] = value })
@@ -358,7 +388,14 @@ export class OpenAICodexResponseRuntime {
     if (compaction && preferences.useNativeCompaction) {
       return this.nativeCompactionStream(provider, model, context, options)
     }
-    return this.standardStream(provider, model, context, options, !compaction && preferences.useWebSocketContextReuse)
+    return this.standardStream(
+      provider,
+      model,
+      context,
+      options,
+      !compaction && preferences.useWebSocketContextReuse,
+      preferences.reasoningSummary,
+    )
   }
 
   private standardStream(
@@ -367,19 +404,27 @@ export class OpenAICodexResponseRuntime {
     context: PiContext,
     options: SimpleStreamOptions | undefined,
     reuseWebSocketContext: boolean,
+    reasoningSummary: ResponseApiPreferences['reasoningSummary'],
   ): AssistantMessageEventStream {
-    return provider.streamSimple(model, context, {
+    const source = provider.streamSimple(model, context, {
       ...options,
       transport: reuseWebSocketContext ? 'websocket-cached' : 'sse',
       onPayload: async (payload, payloadModel) => {
         if (!isRecord(payload)) throw new Error('OpenAI Codex generated a non-object Responses payload')
         const input = Array.isArray(payload['input']) ? expandNativeCompactionMarkers(payload['input']) : payload['input']
-        const transformed = { ...payload, input }
+        const transformed = {
+          ...payload,
+          input,
+          ...isRecord(payload['reasoning'])
+            ? { reasoning: { ...payload['reasoning'], summary: reasoningSummary } }
+            : {},
+        }
         return options?.onPayload === undefined
           ? transformed
           : await options.onPayload(transformed, payloadModel)
       },
     })
+    return normalizeTransportErrors(source)
   }
 
   private nativeCompactionStream(
@@ -397,7 +442,7 @@ export class OpenAICodexResponseRuntime {
       error => {
         const source = options?.signal?.aborted === true
           ? failedStream(model, error, options.signal)
-          : this.standardStream(provider, model, context, options, false)
+          : this.standardStream(provider, model, context, options, false, this.preferences().reasoningSummary)
         void (async () => { for await (const event of source) target.push(event) })()
       },
     )
@@ -444,7 +489,7 @@ export class OpenAICodexResponseRuntime {
       include: ['reasoning.encrypted_content'],
       ...mappedEffort === undefined || mappedEffort === null
         ? {}
-        : { reasoning: { effort: mappedEffort, summary: 'auto' } },
+        : { reasoning: { effort: mappedEffort, summary: this.preferences().reasoningSummary } },
       ...options?.sessionId === undefined ? {} : { prompt_cache_key: options.sessionId },
       text: { verbosity: 'low' },
     }

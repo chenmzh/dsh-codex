@@ -6,6 +6,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-commands'
 import type { CommandResult } from '@deepseek-ai/dsh-commands'
 import type { OpenAICodexService } from './service.ts'
+import type { OpenAICodexReasoningSummary } from './tool-policy.ts'
 import type { OpenAICodexUsage } from './usage.ts'
 
 interface TuiMarkerRuntime {}
@@ -46,13 +47,15 @@ export const name = 'dsh-codex-tui'
 export const inject = ['openAICodex']
 
 const HELP = [
-  'Usage: /codex <status|login|logout|usage|config|set>',
+  'Usage: /codex <status|login|logout|usage|hud|config|set>',
   '  /codex status',
   '  /codex login',
   '  /codex logout',
   '  /codex usage',
+  '  /codex hud <on|off|toggle|pin|unpin|status>',
   '  /codex config',
   '  /codex set <read-image|imagegen-other-models|websocket-context|native-compaction> <on|off>',
+  '  /codex set reasoning-summary <auto|concise|detailed>',
 ].join('\n')
 
 function translatedNode(name: string, en: string, zh: string): TuiSubcommandNode {
@@ -64,6 +67,7 @@ const CODEX_ACTIONS: readonly TuiSubcommandNode[] = [
   translatedNode('login', 'Sign in with ChatGPT in the system browser', '在系统浏览器中登录 ChatGPT'),
   translatedNode('logout', 'Remove the dsh Codex credential', '移除 dsh Codex 登录凭据'),
   translatedNode('usage', 'Show current Codex usage limits', '查看当前 Codex 用量限制'),
+  translatedNode('hud', 'Show, hide, or toggle the Codex usage HUD', '显示、隐藏或切换 Codex 用量条'),
   translatedNode('config', 'Show live Codex settings', '查看 Codex 实时配置'),
   translatedNode('set', 'Change one live Codex setting', '修改一项 Codex 实时配置'),
 ]
@@ -71,6 +75,7 @@ const CODEX_ACTIONS: readonly TuiSubcommandNode[] = [
 const CODEX_SETTINGS: readonly TuiSubcommandNode[] = [
   translatedNode('read-image', 'Enhance read_image with HTTP(S) input', '为 read_image 增加 HTTP(S) 图片输入'),
   translatedNode('imagegen-other-models', 'Allow other vision models to call imagegen', '允许其他视觉模型调用 imagegen'),
+  translatedNode('reasoning-summary', 'Choose the provider-authored reasoning summary detail', '选择提供方推理摘要的详细程度'),
   translatedNode('websocket-context', 'Reuse Codex WebSocket response context', '复用 Codex WebSocket 响应上下文'),
   translatedNode('native-compaction', 'Use Codex V2 Responses compaction', '使用 Codex V2 Responses 压缩'),
 ]
@@ -80,11 +85,22 @@ const BOOLEAN_VALUES: readonly TuiSubcommandNode[] = [
   translatedNode('off', 'Disable this setting', '关闭此设置'),
 ]
 
+const REASONING_SUMMARY_VALUES: readonly TuiSubcommandNode[] = [
+  translatedNode('auto', 'Use the most detailed summary available for the model', '使用模型可用的最详细摘要'),
+  translatedNode('concise', 'Request a concise reasoning summary', '请求简洁推理摘要'),
+  translatedNode('detailed', 'Request a detailed reasoning summary', '请求详细推理摘要'),
+]
+
 function codexSubcommands(path: readonly string[]): readonly TuiSubcommandNode[] {
   if (path.length === 1 && path[0] === 'codex') return CODEX_ACTIONS
+  if (path.length === 2 && path[0] === 'codex' && path[1] === 'hud') {
+    return [...BOOLEAN_VALUES, translatedNode('toggle', 'Toggle the HUD', '切换用量条'), translatedNode('pin', 'Pin the quota badge', '固定额度标记'), translatedNode('unpin', 'Use the borderless quota readout', '使用无边框额度读数'), translatedNode('status', 'Show HUD state', '查看用量条状态')]
+  }
   if (path.length === 2 && path[0] === 'codex' && path[1] === 'set') return CODEX_SETTINGS
-  if (path.length === 3 && path[0] === 'codex' && path[1] === 'set'
-    && CODEX_SETTINGS.some(setting => setting.name === path[2])) return BOOLEAN_VALUES
+  if (path.length === 3 && path[0] === 'codex' && path[1] === 'set') {
+    if (path[2] === 'reasoning-summary') return REASONING_SUMMARY_VALUES
+    if (CODEX_SETTINGS.some(setting => setting.name === path[2])) return BOOLEAN_VALUES
+  }
   return []
 }
 
@@ -232,12 +248,6 @@ function formatUsage(usage: OpenAICodexUsage): string {
       lines.push(`${name} (${window.windowSeconds}s): ${window.remainingPercent.toFixed(1)}% remaining`)
     }
   }
-  if (usage.individualLimit !== undefined) {
-    lines.push(`Individual limit: ${usage.individualLimit.remainingPercent.toFixed(1)}% remaining (${usage.individualLimit.remaining}/${usage.individualLimit.limit})`)
-  }
-  if (usage.credits !== undefined) {
-    lines.push(`Credits: ${usage.credits.unlimited ? 'unlimited' : usage.credits.balance ?? 'available'}`)
-  }
   return lines.length === 0 ? 'OpenAI Codex usage is currently unavailable.' : lines.join('\n')
 }
 
@@ -247,18 +257,24 @@ function formatConfig(service: OpenAICodexService): string {
   return [
     `read-image: ${image.modifyReadImage ? 'on' : 'off'}`,
     `imagegen-other-models: ${image.shareImagegenWithOtherModels ? 'on' : 'off'}`,
+    `reasoning-summary: ${responses.reasoningSummary}`,
     `websocket-context: ${responses.useWebSocketContextReuse ? 'on' : 'off'}`,
     `native-compaction: ${responses.useNativeCompaction ? 'on' : 'off'}`,
+    `usage-hud: ${service.usageUiPreferences().showUsageHud ? 'on' : 'off'} (${service.usageUiPreferences().pinUsageHud ? 'pinned' : 'compact'})`,
   ].join('\n')
 }
 
-async function updateSetting(service: OpenAICodexService, key: string, enabled: boolean): Promise<void> {
+async function updateSetting(service: OpenAICodexService, key: string, value: string): Promise<void> {
+  const enabled = value === 'on'
   switch (key) {
     case 'read-image':
       await service.updateImagePreferences({ modifyReadImage: enabled })
       return
     case 'imagegen-other-models':
       await service.updateImagePreferences({ shareImagegenWithOtherModels: enabled })
+      return
+    case 'reasoning-summary':
+      await service.updateResponsePreferences({ reasoningSummary: value as OpenAICodexReasoningSummary })
       return
     case 'websocket-context':
       await service.updateResponsePreferences({ useWebSocketContextReuse: enabled })
@@ -309,12 +325,29 @@ function registerCodexCommand(ctx: Context): void {
           case 'usage':
             if (parts.length !== 1) return failure(HELP)
             return success(formatUsage(await service.usage()))
+          case 'hud': {
+            const requested = parts[1] ?? 'toggle'
+            if (parts.length > 2 || !['on', 'off', 'toggle', 'pin', 'unpin', 'status'].includes(requested)) return failure(HELP)
+            const current = service.usageUiPreferences()
+            if (requested === 'pin' || requested === 'unpin') {
+              const next = await service.updateUsageUiPreferences({ pinUsageHud: requested === 'pin' })
+              return success('Codex usage HUD: ' + (next.showUsageHud ? 'on' : 'off') + ' (' + (next.pinUsageHud ? 'pinned' : 'compact') + ')')
+            }
+            const visible = requested === 'status' ? current.showUsageHud : requested === 'toggle' ? !current.showUsageHud : requested === 'on'
+            const next = requested === 'status' ? current : await service.updateUsageUiPreferences({ showUsageHud: visible })
+            return success('Codex usage HUD: ' + (next.showUsageHud ? 'on' : 'off') + ' (' + (next.pinUsageHud ? 'pinned' : 'compact') + ')')
+          }
           case 'config':
             if (parts.length !== 1) return failure(HELP)
             return success(formatConfig(service))
           case 'set': {
-            if (parts.length !== 3 || (parts[2] !== 'on' && parts[2] !== 'off')) return failure(HELP)
-            await updateSetting(service, parts[1] as string, parts[2] === 'on')
+            const key = parts[1]
+            const value = parts[2]
+            const valid = key === 'reasoning-summary'
+              ? value === 'auto' || value === 'concise' || value === 'detailed'
+              : value === 'on' || value === 'off'
+            if (parts.length !== 3 || key === undefined || value === undefined || !valid) return failure(HELP)
+            await updateSetting(service, key, value)
             return success(formatConfig(service))
           }
           default:

@@ -52,6 +52,7 @@ const progressTrackStyle: CSSProperties = { height: 8, overflow: 'hidden', borde
 const toggleRowStyle: CSSProperties = { ...rowStyle, flexWrap: 'nowrap', alignItems: 'flex-start' }
 const toggleCopyStyle: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 3 }
 const toggleTrackStyle: CSSProperties = { position: 'relative', width: 40, height: 22, flex: '0 0 auto', marginTop: 1, padding: 0, border: 0, borderRadius: 999, cursor: 'pointer', transition: 'background 120ms ease' }
+const selectStyle: CSSProperties = { minWidth: 132, minHeight: 34, padding: '5px 30px 5px 10px', border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8, background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)', font: 'inherit', fontSize: 14 }
 
 function PreferenceToggle({
   checked,
@@ -152,7 +153,7 @@ function UsageLimits({ usage, quotaError, t }: {
   quotaError?: string
   t: OpenAICodexSettingsInjected['t']
 }) {
-  const hasData = usage.rateLimits.length > 0 || usage.credits !== undefined || usage.individualLimit !== undefined
+  const hasData = usage.rateLimits.length > 0
   return (
     <div style={quotaListStyle}>
       <h3 style={quotaTitleStyle}>{t('usageLimits')}</h3>
@@ -169,25 +170,6 @@ function UsageLimits({ usage, quotaError, t }: {
           ))}
         </div>
       ))}
-      {usage.individualLimit === undefined ? null : (
-        <QuotaBar
-          label={t('monthlyLimit')}
-          percent={usage.individualLimit.remainingPercent}
-          detail={t('exactRemaining', {
-            remaining: usage.individualLimit.remaining,
-            limit: usage.individualLimit.limit,
-          })}
-          t={t}
-        />
-      )}
-      {usage.credits === undefined ? null : (
-        <div style={quotaLabelStyle}>
-          <span>{t('credits')}</span>
-          <span>{usage.credits.unlimited
-            ? t('unlimited')
-            : usage.credits.balance === undefined ? t('available') : usage.credits.balance}</span>
-        </div>
-      )}
       {!hasData && quotaError === undefined ? <p style={bodyStyle}>{t('quotaUnavailable')}</p> : null}
       {quotaError === undefined ? null : <p style={errorStyle}>{t('quotaUnavailable')}</p>}
     </div>
@@ -392,6 +374,28 @@ export function OpenAICodexSettings({ t }: OpenAICodexSettingsProps) {
         <div>
           <h3 style={quotaTitleStyle}>{t('responseApi')}</h3>
           <p style={{ ...bodyStyle, marginTop: 5 }}>{t('responseApiIntro')}</p>
+        </div>
+        <div style={toggleRowStyle}>
+          <label htmlFor="openai-codex-reasoning-summary" style={toggleCopyStyle}>
+            <span style={statusStyle}>{t('reasoningSummary')}</span>
+            <span style={bodyStyle}>{t('reasoningSummaryHint')}</span>
+          </label>
+          <select
+            id="openai-codex-reasoning-summary"
+            aria-label={t('reasoningSummary')}
+            disabled={responseApi === undefined || responseApiBusy}
+            value={responseApi?.reasoningSummary ?? 'auto'}
+            style={{ ...selectStyle, opacity: responseApi === undefined || responseApiBusy ? 0.55 : 1 }}
+            onChange={event => {
+              void updateResponseApi({
+                reasoningSummary: event.currentTarget.value as ResponseApiPreferences['reasoningSummary'],
+              })
+            }}
+          >
+            <option value="auto">{t('reasoningSummaryAuto')}</option>
+            <option value="concise">{t('reasoningSummaryConcise')}</option>
+            <option value="detailed">{t('reasoningSummaryDetailed')}</option>
+          </select>
         </div>
         <div style={toggleRowStyle}>
           <span style={toggleCopyStyle}>

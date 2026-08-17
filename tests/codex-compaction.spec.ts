@@ -10,6 +10,7 @@ import {
   createAssistantMessage,
   createToolResultMessage,
   createUserMessage,
+  ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import WebRuntime from '@deepseek-ai/dsh-web'
@@ -35,17 +36,39 @@ function accessToken(accountId: string): string {
 }
 
 function responseEvents(id = 'resp_compaction', text = 'summary'): string {
+  const reasoning = 'provider-authored reasoning summary'
   const events = [
     { type: 'response.created', response: { id } },
     {
       type: 'response.output_item.added',
       output_index: 0,
-      item: { type: 'message', id: 'msg_compaction', role: 'assistant', content: [] },
+      item: { type: 'reasoning', id: 'rs_response', summary: [] },
     },
-    { type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: text },
+    {
+      type: 'response.reasoning_summary_text.delta',
+      output_index: 0,
+      summary_index: 0,
+      delta: reasoning,
+    },
     {
       type: 'response.output_item.done',
       output_index: 0,
+      item: {
+        type: 'reasoning',
+        id: 'rs_response',
+        summary: [{ type: 'summary_text', text: reasoning }],
+        encrypted_content: 'encrypted-response-reasoning',
+      },
+    },
+    {
+      type: 'response.output_item.added',
+      output_index: 1,
+      item: { type: 'message', id: 'msg_compaction', role: 'assistant', content: [] },
+    },
+    { type: 'response.output_text.delta', output_index: 1, content_index: 0, delta: text },
+    {
+      type: 'response.output_item.done',
+      output_index: 1,
       item: {
         type: 'message',
         id: 'msg_compaction',
@@ -171,7 +194,7 @@ describe('OpenAI Codex compaction request', () => {
     context = ctx
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(WebRuntime)
-    await ctx.plugin(OpenAICodex)
+    await ctx.plugin(OpenAICodex, { reasoningSummary: 'detailed' })
     const assembler = new BlockAssembler()
     for await (const chunk of ctx.llm.stream({
       provider: 'openai-codex',
@@ -179,12 +202,16 @@ describe('OpenAI Codex compaction request', () => {
       purpose: 'compaction',
       system: 'Preserve decisions and unresolved work.',
       messages,
+      reasoningEffort: ReasoningEffortId('high'),
       maxTokens: 777,
       sessionId: 'session-compaction' as never,
     })) assembler.push(chunk)
 
     expect(assembler.message({ kind: 'model', provider: 'openai-codex', model: 'gpt-5.6-sol' }).content)
-      .toEqual([{ type: 'text', text: 'summary' }])
+      .toEqual([
+        { type: 'reasoning', text: 'provider-authored reasoning summary' },
+        { type: 'text', text: 'summary' },
+      ])
     if (request === undefined) throw new Error('Codex request was not captured')
     const captured = request as { url: string; init: RequestInit }
     const headers = new Headers(captured.init.headers)
@@ -198,6 +225,7 @@ describe('OpenAI Codex compaction request', () => {
       store: false,
       instructions: 'Preserve decisions and unresolved work.',
       include: ['reasoning.encrypted_content'],
+      reasoning: { effort: 'high', summary: 'detailed' },
       prompt_cache_key: 'session-compaction',
     })
     expect(body).not.toHaveProperty('max_output_tokens')
@@ -375,7 +403,10 @@ describe('OpenAI Codex compaction request', () => {
       kind: 'model',
       provider: 'openai-codex',
       model: 'gpt-5.6-sol',
-    }).content).toEqual([{ type: 'text', text: 'fallback summary' }])
+    }).content).toEqual([
+      { type: 'reasoning', text: 'provider-authored reasoning summary' },
+      { type: 'text', text: 'fallback summary' },
+    ])
     expect(requests.map(request => request.url)).toEqual([
       'https://chatgpt.com/backend-api/codex/responses',
       'https://chatgpt.com/backend-api/codex/responses',

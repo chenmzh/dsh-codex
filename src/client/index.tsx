@@ -11,6 +11,8 @@ import { OpenAICodexSettings } from './OpenAICodexSettings.tsx'
 import type { OpenAICodexSettingsInjected } from './OpenAICodexSettings.tsx'
 import { ImagegenToolView } from './ImagegenToolView.tsx'
 import type { ImageLoader } from './ImagegenToolView.tsx'
+import { CodexUsageAnalyticsSettings, CodexUsageHud } from './CodexUsageSurface.tsx'
+import type { CodexHudModelDirectory } from './usage-ui-data.ts'
 import { en, zh } from './locales.ts'
 import type { OpenAICodexSettingsKey } from './locales.ts'
 
@@ -19,16 +21,21 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     /** OpenAI Codex account page copy. */
     'settings.openai-codex': OpenAICodexSettingsKey
   }
+  interface SlotMap {
+    /** Full-width row immediately above the active conversation composer. */
+    'conversation.input.dock': { kind: 'list'; scope: 'session' }
+  }
 }
 
 /** Stable browser-plugin name. */
 export const name = 'dsh-codex-client'
 /** Client services required by the settings contribution. */
-export const inject = ['slots', 'locale', 'sessions']
+export const inject = ['slots', 'locale', 'sessions', 'modelDirectories']
 
 /** Register account copy and the OpenAI Codex settings page. */
 export function apply(ctx: ClientContext): void {
   const namespace = 'settings.openai-codex'
+  const modelDirectories = ctx.get('modelDirectories') as { directoryFor(sessionId: SessionId): CodexHudModelDirectory }
   ctx.effect(() => ctx.locale.register(namespace, { zh, en }), 'dsh-openai-codex: settings copy')
   const t = ctx.locale.bind(namespace) as OpenAICodexSettingsInjected['t']
   const imageUrls = new Map<string, Promise<string>>()
@@ -64,6 +71,18 @@ export function apply(ctx: ClientContext): void {
     label: () => t('nav'),
     inject: (): OpenAICodexSettingsInjected => ({ t }),
   }, OpenAICodexSettings))
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'openai-codex-usage',
+    order: 16,
+    label: 'Codex Usage',
+  }, CodexUsageAnalyticsSettings))
+  ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
+    name: 'conversation.input.dock',
+    id: 'openai-codex-usage-hud',
+    order: 100,
+    inject: (sessionId: SessionId): { modelDirectory: CodexHudModelDirectory } => ({ modelDirectory: modelDirectories.directoryFor(sessionId) }),
+  }, CodexUsageHud))
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview',
     key: 'imagegen',

@@ -4,7 +4,6 @@ import { randomUUID } from 'node:crypto'
 import { basename } from 'node:path'
 import { createModels } from '@earendil-works/pi-ai'
 import type { Models } from '@earendil-works/pi-ai'
-import { openaiCodexProvider } from '@earendil-works/pi-ai/providers/openai-codex'
 import type { Context } from '@deepseek-ai/cordis'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
@@ -19,6 +18,7 @@ import { writeWorkspaceBytes } from './binary-fs.ts'
 import { assertImageCapable } from './image-capability.ts'
 import { imageMediaType } from './read-image-enhancement.ts'
 import type { ImageToolPolicy } from './tool-policy.ts'
+import { createOpenAICodexProvider } from './provider.ts'
 
 /** Stable Codex-compatible tool name. */
 export const IMAGEGEN_TOOL_NAME = 'imagegen'
@@ -119,7 +119,7 @@ export class OpenAICodexImageClient {
   /** @param credentials - shared refreshable OAuth store. */
   constructor(credentials: OpenAICodexCredentialStore) {
     const models = createModels({ credentials })
-    models.setProvider(openaiCodexProvider())
+    models.setProvider(createOpenAICodexProvider())
     this.models = models
   }
 

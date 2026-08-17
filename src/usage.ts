@@ -1,9 +1,9 @@
 /** Live ChatGPT Codex rate-limit usage for the browser account page. */
 
 import { createModels } from '@earendil-works/pi-ai'
-import { openaiCodexProvider } from '@earendil-works/pi-ai/providers/openai-codex'
 import type { OpenAICodexCredentialStore } from './store.ts'
 import { OPENAI_CODEX_PROVIDER } from './store.ts'
+import { createOpenAICodexProvider } from './provider.ts'
 
 /** Fixed endpoint used by the official Codex client for ChatGPT rate limits. */
 export const OPENAI_CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage'
@@ -16,6 +16,14 @@ export interface OpenAICodexRateLimitWindow {
   readonly remainingPercent: number
   /** Server-declared rolling-window length in seconds. */
   readonly windowSeconds: number
+  /** Exact credits consumed in this window, only when explicitly disclosed. */
+  readonly usedCredits?: number
+  /** Exact credits remaining in this window, only when explicitly disclosed. */
+  readonly remainingCredits?: number
+  /** Exact credit denominator, only when explicitly disclosed. */
+  readonly totalCredits?: number
+  /** Provider-declared reset timestamp, when disclosed. */
+  readonly resetAt?: number
 }
 
 /** One separately metered Codex quota bucket. */
@@ -73,7 +81,34 @@ function parseWindow(value: unknown): OpenAICodexRateLimitWindow | undefined {
   if (typeof windowSeconds !== 'number' || !Number.isInteger(windowSeconds) || windowSeconds <= 0) {
     throw new Error('OpenAI Codex returned an invalid rate-limit window duration')
   }
-  return { remainingPercent: 100 - usedPercent, windowSeconds }
+  const exact = (key: string): number | undefined => {
+    const candidate = value[key]
+    if (candidate === undefined || candidate === null) return undefined
+    const parsed = typeof candidate === 'string' ? Number(candidate) : candidate
+    if (typeof parsed !== 'number' || !Number.isFinite(parsed) || parsed < 0) {
+      throw new Error(`OpenAI Codex returned an invalid ${key}`)
+    }
+    return parsed
+  }
+  const reset = value['reset_at']
+  let resetAt: number | undefined
+  if (typeof reset === 'number' && Number.isFinite(reset) && reset > 0) {
+    resetAt = reset < 10_000_000_000 ? reset * 1000 : reset
+  } else if (typeof reset === 'string' && reset.length > 0) {
+    const parsed = Date.parse(reset)
+    if (!Number.isNaN(parsed)) resetAt = parsed
+  }
+  const usedCredits = exact('used_credits')
+  const remainingCredits = exact('remaining_credits')
+  const totalCredits = exact('total_credits') ?? exact('weekly_credit_allowance')
+  return {
+    remainingPercent: 100 - usedPercent,
+    windowSeconds,
+    ...usedCredits === undefined ? {} : { usedCredits },
+    ...remainingCredits === undefined ? {} : { remainingCredits },
+    ...totalCredits === undefined ? {} : { totalCredits },
+    ...resetAt === undefined ? {} : { resetAt },
+  }
 }
 
 function parseLimit(id: string, name: string | undefined, value: unknown): OpenAICodexRateLimit | undefined {
@@ -175,7 +210,7 @@ export async function readOpenAICodexRateLimits(
   store: OpenAICodexCredentialStore,
 ): Promise<OpenAICodexUsage> {
   const models = createModels({ credentials: store })
-  models.setProvider(openaiCodexProvider())
+  models.setProvider(createOpenAICodexProvider())
   const auth = await models.getAuth(OPENAI_CODEX_PROVIDER)
   const credential = await store.read(OPENAI_CODEX_PROVIDER)
   const access = auth?.auth.apiKey
