@@ -197,7 +197,11 @@ function rangeBounds(filters: UsageFilters, now = Date.now()): { start?: number;
 }
 
 function filterSql(filters: UsageFilters, alias = 'e'): { sql: string; values: Array<string | number> } {
-  const clauses: string[] = []
+  // pi-ai emits a terminal usage chunk for both completed and failed streams.
+  // Failures without provider usage carry an all-zero object; older plugin
+  // versions persisted those placeholders. Keep them auditable on disk, but
+  // never let them become requests, tasks, sessions, or chart points.
+  const clauses: string[] = [`${alias}.total_tokens > 0`]
   const values: Array<string | number> = []
   const bounds = rangeBounds(filters)
   if (bounds.start !== undefined) {
@@ -216,7 +220,7 @@ function filterSql(filters: UsageFilters, alias = 'e'): { sql: string; values: A
     clauses.push(`${alias}.reasoning_effort IN (${filters.reasoning.map(() => '?').join(', ')})`)
     values.push(...filters.reasoning.map(value => value.toLowerCase()))
   }
-  return { sql: clauses.length === 0 ? '' : `WHERE ${clauses.join(' AND ')}`, values }
+  return { sql: `WHERE ${clauses.join(' AND ')}`, values }
 }
 
 function number(row: Row, key: string): number {
@@ -414,8 +418,7 @@ export class CodexUsageLedger {
         rate.fastMultiplier ?? null, rate.effectiveFrom, rate.effectiveUntil ?? null, rate.source)
   }
 
-  async record(input: RecordCodexUsage): Promise<CodexUsageEvent> {
-    const db = await this.database()
+  async record(input: RecordCodexUsage): Promise<CodexUsageEvent | undefined> {
     const timestamp = input.timestamp ?? Date.now()
     const requestId = input.requestId ?? randomUUID()
     const cacheRead = finiteInteger(input.usage.cacheReadTokens)
@@ -424,6 +427,11 @@ export class CodexUsageLedger {
     const inputTokens = uncachedInput + cacheRead + cacheWrite
     const outputTokens = finiteInteger(input.usage.outputTokens)
     const reasoningTokens = Math.min(outputTokens, finiteInteger(input.usage.reasoningTokens))
+    // A terminal provider error is translated by pi-ai into a usage chunk full
+    // of zeros. It contains no measured usage and must not create a ledger row.
+    if (inputTokens + outputTokens === 0) return undefined
+    const db = await this.database()
+
     const rateRow = db.prepare(`SELECT * FROM codex_credit_rates
       WHERE model = ? AND effective_from <= ? AND (effective_until IS NULL OR effective_until > ?)
       ORDER BY effective_from DESC LIMIT 1`).get(input.model, timestamp, timestamp) as Row | undefined
@@ -571,7 +579,7 @@ export class CodexUsageLedger {
       CASE WHEN COUNT(DISTINCT e.model) = 1 THEN MIN(e.model) ELSE 'Mixed' END AS model,
       CASE WHEN COUNT(DISTINCT e.model_family) = 1 THEN MIN(e.model_family) ELSE 'mixed' END AS model_family,
       CASE WHEN COUNT(DISTINCT e.reasoning_effort) = 1 THEN MIN(e.reasoning_effort) ELSE 'mixed' END AS reasoning_effort,
-      ${TOTAL_COLUMNS} FROM codex_usage_events e WHERE e.session_id = ? GROUP BY e.session_id`)
+      ${TOTAL_COLUMNS} FROM codex_usage_events e WHERE e.session_id = ? AND e.total_tokens > 0 GROUP BY e.session_id`)
       .get(sessionId) as Row | undefined
     return row === undefined ? undefined : this.sessionUsageFromRow(row, await this.weeklyCreditAllowance())
   }
@@ -591,7 +599,7 @@ export class CodexUsageLedger {
   }
   async taskDetail(taskId: string): Promise<TaskDetail | undefined> {
     const db = await this.database()
-    const rows = db.prepare('SELECT * FROM codex_usage_events WHERE task_id = ? ORDER BY timestamp, request_id')
+    const rows = db.prepare('SELECT * FROM codex_usage_events WHERE task_id = ? AND total_tokens > 0 ORDER BY timestamp, request_id')
       .all(taskId) as Row[]
     if (rows.length === 0) return undefined
     const [aggregate] = await this.taskAggregate(taskId)
@@ -605,7 +613,7 @@ export class CodexUsageLedger {
       CASE WHEN COUNT(DISTINCT e.model) = 1 THEN MIN(e.model) ELSE 'Mixed' END AS model,
       CASE WHEN COUNT(DISTINCT e.model_family) = 1 THEN MIN(e.model_family) ELSE 'mixed' END AS model_family,
       CASE WHEN COUNT(DISTINCT e.reasoning_effort) = 1 THEN MIN(e.reasoning_effort) ELSE 'mixed' END AS reasoning_effort,
-      ${TOTAL_COLUMNS} FROM codex_usage_events e WHERE e.task_id = ? GROUP BY e.task_id`).get(taskId) as Row | undefined
+      ${TOTAL_COLUMNS} FROM codex_usage_events e WHERE e.task_id = ? AND e.total_tokens > 0 GROUP BY e.task_id`).get(taskId) as Row | undefined
     if (row === undefined) return []
     const aggregate = totals(row)
     const credits = aggregate.credits
@@ -624,7 +632,7 @@ export class CodexUsageLedger {
 
   async latestTask(): Promise<TaskDetail | undefined> {
     const db = await this.database()
-    const row = db.prepare('SELECT task_id FROM codex_usage_events ORDER BY timestamp DESC LIMIT 1').get() as Row | undefined
+    const row = db.prepare('SELECT task_id FROM codex_usage_events WHERE total_tokens > 0 ORDER BY timestamp DESC LIMIT 1').get() as Row | undefined
     return row === undefined ? undefined : this.taskDetail(text(row, 'task_id'))
   }
 
@@ -735,8 +743,9 @@ export class CodexUsageTracker {
     }
   }
 
-  async record(input: RecordCodexUsage): Promise<CodexUsageEvent> {
+  async record(input: RecordCodexUsage): Promise<CodexUsageEvent | undefined> {
     const event = await this.ledger.record(input)
+    if (event === undefined) return undefined
     this.currentTaskId = event.taskId
     this.notify()
     return event

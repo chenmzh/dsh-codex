@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { DatabaseSync } from 'node:sqlite'
 import {
   classifyCodexModel,
   CodexUsageLedger,
@@ -55,6 +56,66 @@ describe('Codex usage ledger', () => {
     const detail = await value.taskDetail('task-1')
     expect(detail?.events[0]).toMatchObject({ modelFamily: 'sol', reasoningEffort: 'max', totalTokens: 600 })
     expect(detail?.totalTokens).toBe(summary.totalTokens)
+  })
+
+  it('does not persist empty terminal usage from failed provider requests', async () => {
+    const tracker = new CodexUsageTracker(await ledger())
+    let notifications = 0
+    const unsubscribe = tracker.subscribe(() => { notifications++ })
+
+    const event = await tracker.record({
+      timestamp: 1_000,
+      durationMs: 30_000,
+      requestId: 'failed-request',
+      correlation: correlation('failed-task', 'failed-session'),
+      model: 'gpt-5.6-sol',
+      reasoningEffort: 'medium',
+      usage: { inputTokens: 0, outputTokens: 0 },
+    })
+    unsubscribe()
+
+    expect(event).toBeUndefined()
+    expect(notifications).toBe(0)
+    expect(await tracker.ledger.summary({ range: 'all' })).toMatchObject({ requests: 0, tasks: 0, sessions: 0, totalTokens: 0 })
+    expect(await tracker.ledger.latestTask()).toBeUndefined()
+  })
+
+  it('hides legacy empty rows from every analytics projection without deleting them', async () => {
+    const value = await ledger()
+    const legacy = new DatabaseSync(value.filename)
+    legacy.prepare(`INSERT INTO codex_usage_events (
+      timestamp, duration_ms, request_id, task_id, session_id, conversation_id,
+      model, model_family, reasoning_effort, fast_mode,
+      input_tokens, cached_input_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens,
+      credit_source
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      2_000, 30_000, 'legacy-empty', 'legacy-task', 'legacy-session', 'legacy-session',
+      'gpt-5.6-sol', 'sol', 'medium', 0,
+      0, 0, 0, 0, 0, 0, 'unknown',
+    )
+    legacy.close()
+    await value.record({
+      timestamp: 1_000,
+      requestId: 'measured-request',
+      correlation: correlation('measured-task', 'measured-session'),
+      model: 'gpt-5.6-luna',
+      reasoningEffort: 'max',
+      usage: { inputTokens: 8, outputTokens: 2 },
+    })
+
+    expect(await value.summary({ range: 'all' })).toMatchObject({ requests: 1, tasks: 1, sessions: 1, totalTokens: 10 })
+    expect(await value.breakdown('model_family', { range: 'all' })).toMatchObject([{ key: 'luna', requests: 1 }])
+    expect(await value.usageOverTime({ range: 'all' })).toHaveLength(1)
+    expect(await value.tasks({ range: 'all' })).toMatchObject([{ taskId: 'measured-task' }])
+    expect(await value.sessions({ range: 'all' })).toMatchObject([{ sessionId: 'measured-session' }])
+    expect(await value.taskDetail('legacy-task')).toBeUndefined()
+    expect(await value.sessionUsage('legacy-session')).toBeUndefined()
+    expect(await value.latestTask()).toMatchObject({ taskId: 'measured-task' })
+
+    const audit = new DatabaseSync(value.filename, { readOnly: true })
+    expect(audit.prepare('SELECT COUNT(*) AS count FROM codex_usage_events WHERE request_id = ?').get('legacy-empty'))
+      .toMatchObject({ count: 1 })
+    audit.close()
   })
 
   it('aggregates multiple requests by task and isolates concurrent sessions', async () => {
