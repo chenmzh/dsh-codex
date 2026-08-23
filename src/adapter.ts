@@ -1,9 +1,9 @@
 /** OpenAI Codex adapter assembled from public dsh-llm-pi-ai extension points. */
 
-import { randomUUID } from 'node:crypto'
 import { createModels } from '@earendil-works/pi-ai'
-import type { MutableModels, Provider } from '@earendil-works/pi-ai'
-import { resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
+import { randomUUID } from 'node:crypto'
+import type { Context as PiContext, MutableModels, Provider, SimpleStreamOptions } from '@earendil-works/pi-ai'
+import { ReasoningEffortId, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { ResolvedPiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
@@ -11,18 +11,12 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { OpenAICodexCredentialStore } from './store.ts'
 import { OPENAI_CODEX_PROVIDER } from './store.ts'
 import { OpenAICodexResponseRuntime } from './responses.ts'
-import type { ResponseApiPreferences } from './tool-policy.ts'
+import type { ModelCatalogEntry, ResponseApiPreferences } from './tool-policy.ts'
+import type { FastModeRegistry } from './fast-mode.ts'
 import { createOpenAICodexProvider } from './provider.ts'
 import type { CodexUsageTracker } from './usage-ledger.ts'
 
-/**
- * Usage-only correlation metadata for auxiliary calls.
- *
- * These fields are deliberately separate from GenerateOptions.sessionId: they
- * let a caller attach an auxiliary request to a Harness session in analytics
- * without sending a provider continuation identity or changing the provider
- * request itself.
- */
+/** Usage correlation for auxiliary calls without provider continuation state. */
 export interface UsageCorrelationHint {
   readonly usageSessionId?: string
   readonly usagePurpose?: string
@@ -36,12 +30,65 @@ export function usageCorrelationFor(
   const hint = options as GenerateOptions & UsageCorrelationHint
   const sessionId = hint.usageSessionId
     ?? (options.sessionId === undefined ? undefined : String(options.sessionId))
-  const purpose = hint.usagePurpose ?? options.purpose
-  return usageTracker.correlation(sessionId, requestId, purpose)
+  return usageTracker.correlation(sessionId, requestId, hint.usagePurpose ?? options.purpose)
+}
+
+/** Return a detached copy of the complete pi-ai Codex model catalog. */
+export function openAICodexModelCatalog(): readonly ModelCatalogEntry[] {
+  return createOpenAICodexProvider().getModels().map(model => ({ id: model.id, name: model.name }))
 }
 
 /** Provider idle ceiling used by the composite route. */
 export const OPENAI_CODEX_STREAM_IDLE_TIMEOUT_MS = 300_000
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
+/** Lift the pre-rc.7 pi-ai replay shape into the current envelope on read. */
+export function migrateLegacyOpenAICodexReplayState(value: unknown): unknown {
+  const legacy = record(value)
+  if (legacy?.['kind'] !== 'pi-ai' || legacy['version'] !== 1 || !Array.isArray(legacy['blocks'])) return value
+  const {
+    blocks,
+    kind: _kind,
+    version: _version,
+    ...response
+  } = legacy
+  return {
+    response: { ...response, kind: 'pi-ai', version: 2 },
+    blocks,
+  }
+}
+
+function migrateReplayHistory(options: GenerateOptions): GenerateOptions {
+  let changed = false
+  const messages = options.messages.map(message => {
+    if (message.source.kind !== 'model' || message.source.replayState === undefined) return message
+    const replayState = migrateLegacyOpenAICodexReplayState(message.source.replayState)
+    if (replayState === message.source.replayState) return message
+    changed = true
+    return {
+      ...message,
+      source: { ...message.source, replayState },
+    }
+  })
+  return changed ? { ...options, messages } : options
+}
+
+/**
+ * Codex traffic rides on chatgpt.com, which is frequently reached through a
+ * local proxy tunnel that blips for tens of seconds at a time. The dsh
+ * default stops after 2 retries and caps scheduled delays at 10 seconds, so
+ * this provider retries longer and backs off further to ride out such a blip.
+ */
+export const OPENAI_CODEX_RETRY_POLICY = resolveRetryPolicy({
+  mode: 'normal',
+  maxRetries: 5,
+  backoff: { initialDelayMs: 1_000, maxDelayMs: 30_000, jitterRatio: 0.2 },
+}, 'dsh-openai-codex retryPolicy')
 
 /**
  * Give the generic dsh adapter a request-scoped bearer-token entry without
@@ -49,9 +96,41 @@ export const OPENAI_CODEX_STREAM_IDLE_TIMEOUT_MS = 300_000
  * the explicit override supplied by this plugin; it never discovers an API
  * key from the environment or persistent api-key credentials.
  */
-function requestProvider(provider: Provider): Provider {
+function isPayloadRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Add the request-scoped Fast Mode hint without changing other payload fields. */
+export function withOpenAICodexFastMode(
+  provider: Provider,
+  fastMode: FastModeRegistry | undefined,
+): Provider {
+  const streamSimple = provider.streamSimple
   return {
     ...provider,
+    streamSimple(model, context: PiContext, options?: SimpleStreamOptions) {
+      const enabled = provider.id === OPENAI_CODEX_PROVIDER
+        && model.provider === OPENAI_CODEX_PROVIDER
+        && fastMode?.isEnabled(options?.sessionId) === true
+      if (!enabled) return streamSimple.call(provider, model, context, options)
+      const previousOnPayload = options?.onPayload
+      return streamSimple.call(provider, model, context, {
+        ...options,
+        async onPayload(payload, payloadModel) {
+          const replaced = await previousOnPayload?.(payload, payloadModel)
+          const nextPayload = replaced === undefined ? payload : replaced
+          return isPayloadRecord(nextPayload)
+            ? { ...nextPayload, service_tier: 'priority' }
+            : nextPayload
+        },
+      })
+    },
+  }
+}
+
+function requestProvider(provider: Provider, fastMode?: FastModeRegistry): Provider {
+  return {
+    ...withOpenAICodexFastMode(provider, fastMode),
     auth: {
       ...provider.auth,
       apiKey: {
@@ -72,13 +151,30 @@ class OpenAICodexAdapter extends PiAiAdapter {
   constructor(
     options: ConstructorParameters<typeof PiAiAdapter>[0],
     private readonly responses: OpenAICodexResponseRuntime,
-    private readonly usageTracker: CodexUsageTracker,
+    private readonly visibleModelIds?: () => readonly string[],
+    private readonly usageTracker?: CodexUsageTracker,
   ) {
     super(options)
   }
 
-  prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<{ model: unknown; stream: (options: GenerateOptions) => AsyncIterable<StreamChunk> }> {
-    const parent = (PiAiAdapter.prototype as unknown as { prepareCall?: (p: string, m: string, s?: AbortSignal) => Promise<{ model: unknown; stream: (options: GenerateOptions) => AsyncIterable<StreamChunk> }> }).prepareCall
+  override async listModels(provider: string) {
+    const models = await super.listModels(provider)
+    const visibleModelIds = this.visibleModelIds?.()
+    if (visibleModelIds === undefined) return models
+    const visible = new Set(visibleModelIds)
+    return models.filter(model => visible.has(model.id))
+  }
+
+  prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<{
+    model: unknown
+    stream: (options: GenerateOptions) => AsyncIterable<StreamChunk>
+  }> {
+    const parent = (PiAiAdapter.prototype as unknown as {
+      prepareCall?: (p: string, m: string, s?: AbortSignal) => Promise<{
+        model: unknown
+        stream: (options: GenerateOptions) => AsyncIterable<StreamChunk>
+      }>
+    }).prepareCall
     const base = parent !== undefined
       ? parent.call(this, provider, model, signal)
       : this.resolveModel(provider, model, signal).then(resolved => ({
@@ -97,20 +193,22 @@ class OpenAICodexAdapter extends PiAiAdapter {
 
   private async *streamWrapped(
     options: GenerateOptions,
-    delegate: (opts: GenerateOptions) => AsyncIterable<StreamChunk>,
+    delegate: (options: GenerateOptions) => AsyncIterable<StreamChunk>,
   ): AsyncIterable<StreamChunk> {
-    const effectiveOptions: GenerateOptions = options.model === 'gpt-5.6-luna' && (options.reasoningEffort === undefined || options.reasoningEffort === 'medium')
-      ? { ...options, reasoningEffort: 'max' as any }
+    const effectiveOptions: GenerateOptions = options.model === 'gpt-5.6-luna'
+      && (options.reasoningEffort === undefined || options.reasoningEffort === 'medium')
+      ? { ...options, reasoningEffort: ReasoningEffortId('max') }
       : options
-    const release = effectiveOptions.purpose === 'compaction'
-      ? this.responses.enterCompaction(effectiveOptions.sessionId === undefined ? undefined : String(effectiveOptions.sessionId))
+    const migratedOptions = migrateReplayHistory(effectiveOptions)
+    const release = migratedOptions.purpose === 'compaction'
+      ? this.responses.enterCompaction(migratedOptions.sessionId === undefined ? undefined : String(migratedOptions.sessionId))
       : undefined
     const requestId = randomUUID()
     const requestStartedAt = Date.now()
     let usageRecorded = false
     try {
-      for await (const chunk of delegate(effectiveOptions)) {
-        if (chunk.type === 'usage' && !usageRecorded) {
+      for await (const chunk of delegate(migratedOptions)) {
+        if (chunk.type === 'usage' && !usageRecorded && this.usageTracker !== undefined) {
           usageRecorded = true
           const providerUsage = chunk.usage as typeof chunk.usage & { serverCredits?: unknown; credits?: unknown }
           const directCredits = typeof providerUsage.serverCredits === 'number'
@@ -119,9 +217,10 @@ class OpenAICodexAdapter extends PiAiAdapter {
           await this.usageTracker.record({
             requestId,
             durationMs: Date.now() - requestStartedAt,
-            correlation: usageCorrelationFor(effectiveOptions, requestId, this.usageTracker),
-            model: effectiveOptions.model,
-            ...effectiveOptions.reasoningEffort === undefined ? {} : { reasoningEffort: String(effectiveOptions.reasoningEffort) },
+            correlation: usageCorrelationFor(migratedOptions, requestId, this.usageTracker),
+            provider: OPENAI_CODEX_PROVIDER,
+            model: migratedOptions.model,
+            ...migratedOptions.reasoningEffort === undefined ? {} : { reasoningEffort: String(migratedOptions.reasoningEffort) },
             ...directCredits === undefined || !Number.isFinite(directCredits) || directCredits < 0
               ? {}
               : { serverCredits: directCredits },
@@ -148,7 +247,9 @@ export function createOpenAICodexAdapter(
   credentials: OpenAICodexCredentialStore,
   resolveAttachments: () => AttachmentStore | undefined,
   responsePreferences: () => ResponseApiPreferences,
-  usageTracker: CodexUsageTracker,
+  fastMode?: FastModeRegistry,
+  visibleModelIds?: () => readonly string[],
+  usageTracker?: CodexUsageTracker,
 ): PiAiAdapter {
   const provider = createOpenAICodexProvider()
   const responses = new OpenAICodexResponseRuntime(responsePreferences)
@@ -156,9 +257,9 @@ export function createOpenAICodexAdapter(
     provider: OPENAI_CODEX_PROVIDER,
     displayName: 'OpenAI Codex',
     streamIdleTimeoutMs: OPENAI_CODEX_STREAM_IDLE_TIMEOUT_MS,
-    retryPolicy: resolveRetryPolicy(undefined, 'dsh-openai-codex retryPolicy'),
+    retryPolicy: OPENAI_CODEX_RETRY_POLICY,
     configuredMaxTokens: new Map(),
-    piProvider: responses.wrap(requestProvider(provider)),
+    piProvider: responses.wrap(requestProvider(provider, fastMode)),
   }]])
   const models: MutableModels = createModels({ credentials })
   models.setProvider(provider)
@@ -166,5 +267,5 @@ export function createOpenAICodexAdapter(
     profiles: () => profiles,
     resolveApiKey: async () => (await models.getAuth(OPENAI_CODEX_PROVIDER))?.auth.apiKey,
     resolveAttachments,
-  }, responses, usageTracker)
+  }, responses, visibleModelIds, usageTracker)
 }

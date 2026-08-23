@@ -27,7 +27,27 @@ export interface UsageUiPreferences {
   pinUsageHud: boolean
 }
 
-interface OpenAICodexPreferences extends ImageToolPreferences, ResponseApiPreferences, UsageUiPreferences {
+/** One selectable model from the complete provider catalog. */
+export interface ModelCatalogEntry {
+  id: string
+  name: string
+}
+
+/** Live subset advertised through dsh model discovery. */
+export interface ModelCatalogPreferences {
+  models: string[]
+}
+
+/** Browser projection containing both available and currently visible models. */
+export interface ModelCatalogSettings extends ModelCatalogPreferences {
+  availableModels: ModelCatalogEntry[]
+}
+
+interface OpenAICodexPreferences extends
+  ImageToolPreferences,
+  ResponseApiPreferences,
+  UsageUiPreferences,
+  ModelCatalogPreferences {
   /** Migration-only key written by the unreleased store:true experiment. */
   useStatefulResponses: boolean
 }
@@ -51,30 +71,39 @@ export const DEFAULT_USAGE_UI_PREFERENCES: UsageUiPreferences = {
 }
 
 const NAMESPACE = settingsNamespace('openai-codex')
-const schema: z<OpenAICodexPreferences> = z.object({
-  modifyReadImage: z.boolean().default(true),
-  shareImagegenWithOtherModels: z.boolean().default(true),
-  reasoningSummary: z.union(OPENAI_CODEX_REASONING_SUMMARIES).default('auto'),
-  useWebSocketContextReuse: z.boolean().default(false),
-  useStatefulResponses: z.boolean().default(false),
-  useNativeCompaction: z.boolean().default(false),
-  showUsageHud: z.boolean().default(true),
-  pinUsageHud: z.boolean().default(false),
-})
+function preferenceSchema(defaultModels: readonly string[]): z<OpenAICodexPreferences> {
+  return z.object({
+    modifyReadImage: z.boolean().default(true),
+    shareImagegenWithOtherModels: z.boolean().default(true),
+    reasoningSummary: z.union(OPENAI_CODEX_REASONING_SUMMARIES).default('auto'),
+    useWebSocketContextReuse: z.boolean().default(false),
+    useStatefulResponses: z.boolean().default(false),
+    useNativeCompaction: z.boolean().default(false),
+    showUsageHud: z.boolean().default(true),
+    pinUsageHud: z.boolean().default(false),
+    models: z.array(z.string()).default([...defaultModels]),
+  })
+}
 
 /** Live policy shared by the host tools, Codex adapter, and settings HTTP surface. */
 export class ImageToolPolicy {
   private current: OpenAICodexPreferences
   private scope: SettingsScope<OpenAICodexPreferences> | undefined
   private readonly imageWatchers = new Set<() => void>()
+  private readonly modelCatalog: readonly ModelCatalogEntry[]
 
-  constructor(base: Partial<OpenAICodexPreferences> = {}) {
+  constructor(
+    base: Partial<OpenAICodexPreferences> = {},
+    modelCatalog: readonly ModelCatalogEntry[] = [],
+  ) {
+    this.modelCatalog = modelCatalog.map(model => ({ ...model }))
     this.current = {
       ...DEFAULT_IMAGE_TOOL_PREFERENCES,
       ...DEFAULT_RESPONSE_API_PREFERENCES,
       ...DEFAULT_USAGE_UI_PREFERENCES,
       useStatefulResponses: false,
       ...base,
+      models: this.normalizeModels(base.models ?? this.modelCatalog.map(model => model.id)),
     }
     if (this.current.useStatefulResponses && base.useWebSocketContextReuse === undefined) {
       this.current = { ...this.current, useWebSocketContextReuse: true }
@@ -83,14 +112,14 @@ export class ImageToolPolicy {
 
   /** Register durable live settings when the active profile supplies ctx.settings. */
   attach(ctx: Context): void {
-    const scope = ctx.settings.register(NAMESPACE, schema, { base: this.current, applies: 'live' })
+    const scope = ctx.settings.register(NAMESPACE, preferenceSchema(this.current.models), { base: this.current, applies: 'live' })
     this.scope = scope
     this.replace(scope.get())
     const unwatch = scope.watch(next => { this.replace(next) })
     ctx.effect(() => () => {
       unwatch()
       if (this.scope === scope) this.scope = undefined
-    }, 'dsh-openai-codex: image tool preferences')
+    }, 'dsh-openai-codex: preferences')
   }
 
   /** Return a detached settings projection for the browser. */
@@ -146,6 +175,23 @@ export class ImageToolPolicy {
     return this.usageUiSnapshot()
   }
 
+  /** Return available models and the live discovery subset for the browser. */
+  modelCatalogSnapshot(): ModelCatalogSettings {
+    return {
+      availableModels: this.modelCatalog.map(model => ({ ...model })),
+      models: [...this.current.models],
+    }
+  }
+
+  /** Persist the model subset advertised by this provider. */
+  async updateModelCatalog(patch: Partial<ModelCatalogPreferences>): Promise<ModelCatalogSettings> {
+    if (this.scope === undefined) throw new Error('OpenAI Codex settings service is unavailable')
+    if (patch.models === undefined) return this.modelCatalogSnapshot()
+    await this.scope.update({ models: this.normalizeModels(patch.models) })
+    this.replace(this.scope.get())
+    return this.modelCatalogSnapshot()
+  }
+
   /** Enforce imagegen's cross-provider toggle at execution time. */
   assertAllowed(exec: ToolExecution, tool: 'imagegen'): void {
     const configured = exec.agent?.session.requestHeader()?.config
@@ -160,11 +206,17 @@ export class ImageToolPolicy {
     next = next.useStatefulResponses && !next.useWebSocketContextReuse
       ? { ...next, useWebSocketContextReuse: true }
       : next
+    next = { ...next, models: this.normalizeModels(next.models) }
     const imageChanged = next.modifyReadImage !== this.current.modifyReadImage
       || next.shareImagegenWithOtherModels !== this.current.shareImagegenWithOtherModels
     this.current = next
     if (imageChanged) {
       for (const listener of this.imageWatchers) listener()
     }
+  }
+
+  private normalizeModels(models: readonly string[]): string[] {
+    const selected = new Set(models)
+    return this.modelCatalog.filter(model => selected.has(model.id)).map(model => model.id)
   }
 }

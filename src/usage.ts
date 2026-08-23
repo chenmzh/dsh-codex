@@ -10,6 +10,32 @@ export const OPENAI_CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usag
 
 const USAGE_REQUEST_TIMEOUT_MS = 15_000
 
+/** Stable public discriminant for an expired or revoked Codex OAuth session. */
+export const OPENAI_CODEX_REAUTH_REQUIRED_CODE = 'OPENAI_CODEX_REAUTH_REQUIRED' as const
+
+/** Fixed, secret-free message for a browser-facing reauthorization prompt. */
+export const OPENAI_CODEX_REAUTH_REQUIRED_MESSAGE = 'OpenAI Codex authorization must be renewed'
+
+/**
+ * Raised when the usage endpoint rejects the current OAuth session.
+ *
+ * The error intentionally carries no response, credential, or account data so
+ * callers can safely pass its fixed message across the Web boundary.
+ */
+export class OpenAICodexReauthRequiredError extends Error {
+  readonly code = OPENAI_CODEX_REAUTH_REQUIRED_CODE
+
+  constructor() {
+    super(OPENAI_CODEX_REAUTH_REQUIRED_MESSAGE)
+    this.name = 'OpenAICodexReauthRequiredError'
+  }
+}
+
+/** Identify the dedicated reauthorization failure without comparing messages. */
+export function isOpenAICodexReauthRequiredError(error: unknown): error is OpenAICodexReauthRequiredError {
+  return error instanceof OpenAICodexReauthRequiredError
+}
+
 /** One quota window expressed as remaining capacity for direct UI rendering. */
 export interface OpenAICodexRateLimitWindow {
   /** Percent still available in this window. */
@@ -22,7 +48,7 @@ export interface OpenAICodexRateLimitWindow {
   readonly remainingCredits?: number
   /** Exact credit denominator, only when explicitly disclosed. */
   readonly totalCredits?: number
-  /** Provider-declared reset timestamp, when disclosed. */
+  /** Server-declared reset time as Unix seconds, when supplied and valid. */
   readonly resetAt?: number
 }
 
@@ -70,6 +96,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/** JavaScript Date's maximum representable instant, expressed in Unix seconds. */
+const MAX_DATE_UNIX_SECONDS = Math.floor(8_640_000_000_000_000 / 1_000)
+
+function parseResetAt(record: Record<string, unknown>): number | undefined {
+  if (!Object.hasOwn(record, 'reset_at')) return undefined
+  const value = record['reset_at']
+  if (value === null) return undefined
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0 || value > MAX_DATE_UNIX_SECONDS) {
+    throw new Error('OpenAI Codex returned an invalid rate-limit reset time')
+  }
+  // Keep the projection bounded by Date's actual range rather than allowing an
+  // integer that would overflow when a browser formats it as milliseconds.
+  if (!Number.isFinite(new Date(value * 1_000).getTime())) {
+    throw new Error('OpenAI Codex returned an invalid rate-limit reset time')
+  }
+  return value
+}
+
 function parseWindow(value: unknown): OpenAICodexRateLimitWindow | undefined {
   if (value === undefined || value === null) return undefined
   if (!isRecord(value)) throw new Error('OpenAI Codex returned a malformed rate-limit window')
@@ -90,14 +134,7 @@ function parseWindow(value: unknown): OpenAICodexRateLimitWindow | undefined {
     }
     return parsed
   }
-  const reset = value['reset_at']
-  let resetAt: number | undefined
-  if (typeof reset === 'number' && Number.isFinite(reset) && reset > 0) {
-    resetAt = reset < 10_000_000_000 ? reset * 1000 : reset
-  } else if (typeof reset === 'string' && reset.length > 0) {
-    const parsed = Date.parse(reset)
-    if (!Number.isNaN(parsed)) resetAt = parsed
-  }
+  const resetAt = parseResetAt(value)
   const usedCredits = exact('used_credits')
   const remainingCredits = exact('remaining_credits')
   const totalCredits = exact('total_credits') ?? exact('weekly_credit_allowance')
@@ -231,9 +268,10 @@ export async function readOpenAICodexRateLimits(
     signal: AbortSignal.timeout(USAGE_REQUEST_TIMEOUT_MS),
   })
   if (!response.ok) {
-    throw new Error(response.status === 401 || response.status === 403
-      ? 'OpenAI Codex sign-in needs to be renewed'
-      : `OpenAI Codex usage request failed with HTTP ${response.status}`)
+    if (response.status === 401 || response.status === 403) {
+      throw new OpenAICodexReauthRequiredError()
+    }
+    throw new Error(`OpenAI Codex usage request failed with HTTP ${response.status}`)
   }
   let value: unknown
   try {

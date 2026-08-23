@@ -5,6 +5,8 @@ import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-tool/client'
+import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type {} from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { OpenAICodexSettings } from './OpenAICodexSettings.tsx'
@@ -13,6 +15,8 @@ import { ImagegenToolView } from './ImagegenToolView.tsx'
 import type { ImageLoader } from './ImagegenToolView.tsx'
 import { CodexUsageAnalyticsSettings, CodexUsageHud } from './LlmUsageSurface.tsx'
 import type { CodexHudModelDirectory } from './usage-ui-data.ts'
+import { OpenAICodexFastModeToggle } from './OpenAICodexFastModeToggle.tsx'
+import type { OpenAICodexFastModeToggleInjected } from './OpenAICodexFastModeToggle.tsx'
 import { en, zh } from './locales.ts'
 import type { OpenAICodexSettingsKey } from './locales.ts'
 
@@ -20,10 +24,6 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
     /** OpenAI Codex account page copy. */
     'settings.openai-codex': OpenAICodexSettingsKey
-  }
-  interface SlotMap {
-    /** Full-width row immediately above the active conversation composer. */
-    'conversation.input.dock': { kind: 'list'; scope: 'session' }
   }
 }
 
@@ -91,4 +91,15 @@ export function apply(ctx: ClientContext): void {
       t,
     }),
   }, ImagegenToolView))
+  ctx.inject(['slots', 'modelDirectories'], scope => {
+    scope.slots.inject('conversation.input.right', () => scope.slots.register({
+      name: 'conversation.input.right',
+      id: 'openai-codex-fast-mode',
+      order: 10,
+      locale: namespace,
+      inject: (sessionId): OpenAICodexFastModeToggleInjected => ({
+        directory: scope.modelDirectories.directoryFor(sessionId).store,
+      }),
+    }, OpenAICodexFastModeToggle))
+  })
 }

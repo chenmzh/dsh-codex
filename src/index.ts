@@ -14,13 +14,15 @@ import type {} from '@deepseek-ai/dsh-web'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-fs'
-import { createOpenAICodexAdapter } from './adapter.ts'
+import { createOpenAICodexAdapter, openAICodexModelCatalog } from './adapter.ts'
 export type { UsageCorrelationHint } from './adapter.ts'
 import { registerOpenAICodexAuthRoutes } from './auth-routes.ts'
 import { registerOpenAICodexUsageRoutes } from './usage-routes.ts'
 import { installReadImageEnhancement } from './read-image-enhancement.ts'
 import { imagegenTool } from './imagegen.ts'
 import { ImageToolPolicy } from './tool-policy.ts'
+import { FastModeRegistry } from './fast-mode.ts'
+import { assertNoOpenAICodexProviderConflict } from './doctor.ts'
 import {
   installOpenAICodexSearchEvent,
   recordOpenAICodexSearchRequest,
@@ -45,7 +47,15 @@ export type {
   OpenAICodexReasoningSummary,
   ResponseApiPreferences,
 } from './tool-policy.ts'
-export { OPENAI_CODEX_USAGE_URL, parseOpenAICodexUsage, readOpenAICodexRateLimits } from './usage.ts'
+export {
+  isOpenAICodexReauthRequiredError,
+  OPENAI_CODEX_REAUTH_REQUIRED_CODE,
+  OPENAI_CODEX_REAUTH_REQUIRED_MESSAGE,
+  OPENAI_CODEX_USAGE_URL,
+  OpenAICodexReauthRequiredError,
+  parseOpenAICodexUsage,
+  readOpenAICodexRateLimits,
+} from './usage.ts'
 export type {
   OpenAICodexCredits,
   OpenAICodexIndividualLimit,
@@ -98,6 +108,20 @@ export type { OpenAICodexServiceOptions } from './service.ts'
 export { captureProviderUsage, installProviderUsageTracking } from './usage-middleware.ts'
 export type { UsageCaptureInternals } from './usage-middleware.ts'
 
+export {
+  assertNoOpenAICodexProviderConflict,
+  diagnoseOpenAICodex,
+  openAICodexConflictMessage,
+} from './doctor.ts'
+export type { OpenAICodexDiagnosticOptions, OpenAICodexDiagnosticReport } from './doctor.ts'
+export {
+  FastModeRegistry,
+  isFastModeSessionId,
+  OPENAI_CODEX_FAST_MODE_MAX_SESSIONS,
+  OPENAI_CODEX_FAST_MODE_MAX_SESSION_ID_LENGTH,
+} from './fast-mode.ts'
+export { OPENAI_CODEX_FAST_MODE_PATH } from './fast-mode-paths.ts'
+
 export { loginOpenAICodex, logoutOpenAICodex, openAICodexAuthStatus } from './auth.ts'
 export type { OpenAICodexAuthStatus } from './auth.ts'
 export {
@@ -132,6 +156,8 @@ export const inject = ['llm', 'web']
 
 /** Composite model and standalone-search configuration. */
 export interface Config {
+  /** Model ids advertised by the provider; omitted to advertise the full catalog. */
+  models?: string[] | undefined
   /** Model used for auxiliary standalone searches. */
   searchModel?: string
   /** Cached, indexed, or live web access. */
@@ -153,6 +179,7 @@ export interface Config {
 }
 
 export const Config: z<Config> = z.object({
+  models: z.union([z.const(undefined), z.array(z.string())]),
   searchModel: z.string().default(DEFAULT_OPENAI_CODEX_SEARCH_MODEL),
   searchMode: z.union(['cached', 'indexed', 'live'] as const).default(DEFAULT_OPENAI_CODEX_SEARCH_MODE),
   searchContextSize: z.union(['low', 'medium', 'high'] as const).default(DEFAULT_OPENAI_CODEX_SEARCH_CONTEXT_SIZE),
@@ -173,6 +200,8 @@ export const Config: z<Config> = z.object({
 export function apply(ctx: Context, config: Config): void {
   installOpenAICodexSearchEvent()
   const service = new OpenAICodexService({
+    ...config.models === undefined ? {} : { models: config.models },
+    modelCatalog: openAICodexModelCatalog(),
     modifyReadImage: config.modifyReadImage ?? true,
     shareImagegenWithOtherModels: config.shareImagegenWithOtherModels ?? true,
     reasoningSummary: config.reasoningSummary ?? 'auto',
@@ -183,6 +212,8 @@ export function apply(ctx: Context, config: Config): void {
   const imageTools = service.policy
   const usageTracker = service.usageTracker
   installProviderUsageTracking(ctx, usageTracker, new Set([OPENAI_CODEX_PROVIDER]))
+  const fastMode = new FastModeRegistry()
+  assertNoOpenAICodexProviderConflict(ctx.llm.listProviders().map(provider => provider.id))
   ctx.provide('openAICodex', service)
   ctx.inject(['settings'], settingsCtx => { service.attachSettings(settingsCtx) })
   ctx.llm.registerAdapter(
@@ -191,6 +222,8 @@ export function apply(ctx: Context, config: Config): void {
       credentials,
       () => ctx.get('attachments'),
       () => imageTools.responseApiSnapshot(),
+      fastMode,
+      () => imageTools.modelCatalogSnapshot().models,
       usageTracker,
     ),
   )
@@ -204,7 +237,13 @@ export function apply(ctx: Context, config: Config): void {
     recordRequest: request => { recordOpenAICodexSearchRequest(ctx, request) },
   }))
   ctx.inject(['webServer'], webCtx => {
-    registerOpenAICodexAuthRoutes(webCtx, credentials, imageTools)
+    registerOpenAICodexAuthRoutes(
+      webCtx,
+      credentials,
+      undefined,
+      fastMode,
+      imageTools,
+    )
     registerOpenAICodexUsageRoutes(webCtx, service)
   })
   ctx.inject(['agents'], agentCtx => {
