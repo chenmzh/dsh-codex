@@ -15,6 +15,31 @@ import type { ResponseApiPreferences } from './tool-policy.ts'
 import { createOpenAICodexProvider } from './provider.ts'
 import type { CodexUsageTracker } from './usage-ledger.ts'
 
+/**
+ * Usage-only correlation metadata for auxiliary calls.
+ *
+ * These fields are deliberately separate from GenerateOptions.sessionId: they
+ * let a caller attach an auxiliary request to a Harness session in analytics
+ * without sending a provider continuation identity or changing the provider
+ * request itself.
+ */
+export interface UsageCorrelationHint {
+  readonly usageSessionId?: string
+  readonly usagePurpose?: string
+}
+
+export function usageCorrelationFor(
+  options: GenerateOptions,
+  requestId: string,
+  usageTracker: Pick<CodexUsageTracker, 'correlation'>,
+) {
+  const hint = options as GenerateOptions & UsageCorrelationHint
+  const sessionId = hint.usageSessionId
+    ?? (options.sessionId === undefined ? undefined : String(options.sessionId))
+  const purpose = hint.usagePurpose ?? options.purpose
+  return usageTracker.correlation(sessionId, requestId, purpose)
+}
+
 /** Provider idle ceiling used by the composite route. */
 export const OPENAI_CODEX_STREAM_IDLE_TIMEOUT_MS = 300_000
 
@@ -52,7 +77,28 @@ class OpenAICodexAdapter extends PiAiAdapter {
     super(options)
   }
 
+  prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<{ model: unknown; stream: (options: GenerateOptions) => AsyncIterable<StreamChunk> }> {
+    const parent = (PiAiAdapter.prototype as unknown as { prepareCall?: (p: string, m: string, s?: AbortSignal) => Promise<{ model: unknown; stream: (options: GenerateOptions) => AsyncIterable<StreamChunk> }> }).prepareCall
+    const base = parent !== undefined
+      ? parent.call(this, provider, model, signal)
+      : this.resolveModel(provider, model, signal).then(resolved => ({
+          model: resolved,
+          stream: (options: GenerateOptions) => this.stream(options),
+        }))
+    return Promise.resolve(base).then(prepared => ({
+      ...prepared,
+      stream: (options: GenerateOptions) => this.streamWrapped(options, prepared.stream),
+    }))
+  }
+
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    yield* this.streamWrapped(options, opts => super.stream(opts))
+  }
+
+  private async *streamWrapped(
+    options: GenerateOptions,
+    delegate: (opts: GenerateOptions) => AsyncIterable<StreamChunk>,
+  ): AsyncIterable<StreamChunk> {
     const release = options.purpose === 'compaction'
       ? this.responses.enterCompaction(options.sessionId === undefined ? undefined : String(options.sessionId))
       : undefined
@@ -60,10 +106,9 @@ class OpenAICodexAdapter extends PiAiAdapter {
     const requestStartedAt = Date.now()
     let usageRecorded = false
     try {
-      for await (const chunk of super.stream(options)) {
+      for await (const chunk of delegate(options)) {
         if (chunk.type === 'usage' && !usageRecorded) {
           usageRecorded = true
-          const sessionId = options.sessionId === undefined ? undefined : String(options.sessionId)
           const providerUsage = chunk.usage as typeof chunk.usage & { serverCredits?: unknown; credits?: unknown }
           const directCredits = typeof providerUsage.serverCredits === 'number'
             ? providerUsage.serverCredits
@@ -71,7 +116,7 @@ class OpenAICodexAdapter extends PiAiAdapter {
           await this.usageTracker.record({
             requestId,
             durationMs: Date.now() - requestStartedAt,
-            correlation: this.usageTracker.correlation(sessionId, requestId, options.purpose),
+            correlation: usageCorrelationFor(options, requestId, this.usageTracker),
             model: options.model,
             ...options.reasoningEffort === undefined ? {} : { reasoningEffort: String(options.reasoningEffort) },
             ...directCredits === undefined || !Number.isFinite(directCredits) || directCredits < 0
