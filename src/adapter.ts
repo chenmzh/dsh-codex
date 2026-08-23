@@ -99,14 +99,17 @@ class OpenAICodexAdapter extends PiAiAdapter {
     options: GenerateOptions,
     delegate: (opts: GenerateOptions) => AsyncIterable<StreamChunk>,
   ): AsyncIterable<StreamChunk> {
-    const release = options.purpose === 'compaction'
-      ? this.responses.enterCompaction(options.sessionId === undefined ? undefined : String(options.sessionId))
+    const effectiveOptions: GenerateOptions = options.model === 'gpt-5.6-luna' && (options.reasoningEffort === undefined || options.reasoningEffort === 'medium')
+      ? { ...options, reasoningEffort: 'max' as any }
+      : options
+    const release = effectiveOptions.purpose === 'compaction'
+      ? this.responses.enterCompaction(effectiveOptions.sessionId === undefined ? undefined : String(effectiveOptions.sessionId))
       : undefined
     const requestId = randomUUID()
     const requestStartedAt = Date.now()
     let usageRecorded = false
     try {
-      for await (const chunk of delegate(options)) {
+      for await (const chunk of delegate(effectiveOptions)) {
         if (chunk.type === 'usage' && !usageRecorded) {
           usageRecorded = true
           const providerUsage = chunk.usage as typeof chunk.usage & { serverCredits?: unknown; credits?: unknown }
@@ -116,9 +119,9 @@ class OpenAICodexAdapter extends PiAiAdapter {
           await this.usageTracker.record({
             requestId,
             durationMs: Date.now() - requestStartedAt,
-            correlation: usageCorrelationFor(options, requestId, this.usageTracker),
-            model: options.model,
-            ...options.reasoningEffort === undefined ? {} : { reasoningEffort: String(options.reasoningEffort) },
+            correlation: usageCorrelationFor(effectiveOptions, requestId, this.usageTracker),
+            model: effectiveOptions.model,
+            ...effectiveOptions.reasoningEffort === undefined ? {} : { reasoningEffort: String(effectiveOptions.reasoningEffort) },
             ...directCredits === undefined || !Number.isFinite(directCredits) || directCredits < 0
               ? {}
               : { serverCredits: directCredits },
