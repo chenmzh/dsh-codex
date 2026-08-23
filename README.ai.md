@@ -15,7 +15,8 @@ Use this file as the complete low-token runbook. Human docs: [English](README.md
 - Mutual exclusion: install this build instead of upstream/npm `dsh-codex`. Never install both in one profile.
 - Auth: ChatGPT Codex OAuth; no OpenAI Platform API key.
 - Storage: `$DSH_HOME/.openai-codex-usage.sqlite3`; request metadata only, no prompts, responses, or tokens.
-- Credits: unavailable credit fields are not shown. Weekly quota precision is server-authoritative.
+- Session usage: provider-neutral normalized token counts; DeepSeek, OpenCode Go, Kimi, and standard usage-emitting DSH adapters.
+- Account quota: separate OpenAI Codex account feature, never mixed into LLM Usage analytics.
 
 ## Install
 
@@ -67,10 +68,10 @@ Require all:
 2. Boot manifest contains `dsh-codex`.
 3. `GET /plugins/dsh-openai-codex/auth/status` returns HTTP 200 and no credentials.
 4. `GET /plugins/dsh-openai-codex/usage/summary?range=7d` returns HTTP 200.
-5. Settings contains **OpenAI Codex** and **Codex Usage**.
-6. Weekly HUD appears only when the current session provider is exactly `openai-codex`.
-7. Analytics filters: time, model, reasoning.
-8. **Download JSON** exports the current filtered panel without credit fields.
+5. Settings contains **OpenAI Codex** and **LLM Usage**.
+6. Session HUD appears for any configured provider/model and displays no account quota.
+7. Analytics filters: provider, time, exact model, reasoning.
+8. **Download JSON** exports the current filtered panel without quota or credit fields.
 
 ## Safety
 

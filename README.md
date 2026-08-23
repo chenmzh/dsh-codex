@@ -16,10 +16,15 @@ Use a ChatGPT subscription in [DeepSeek Harness](https://github.com/deepseek-ai/
 - optional HTTP(S) URL input added to Harness's existing `read_image` tool
 - an `imagegen` tool backed by `gpt-image-2`, with workspace or conversation reference images and automatic workspace output
 - browser image input through dsh's existing paste and drop controls
-- a persistent, request-level SQLite usage ledger shared by the session-aware weekly HUD and Settings analytics panel
-- global time/model/reasoning filters, model-stacked usage charts, task/session drill-down, and credit-free JSON reports
+- a persistent, provider-neutral SQLite usage ledger shared by the current-session HUD and **LLM Usage** analytics panel
+- provider/time/exact-model/reasoning filters, task/session drill-down, and quota-free JSON reports
 
 ChatGPT subscription authentication and usage-based OpenAI API access are different products. This plugin uses the ChatGPT Codex backend only; it does not turn a subscription into a general-purpose OpenAI API credential.
+
+The **LLM Usage** surface counts tokens returned by DSH's normalized stream for the active session; it does not query account balances or provider quotas. It records uncached input, cached input, output, reasoning, and total tokens when the adapter reports them. DeepSeek, OpenCode Go, and Kimi routes are covered, and any other DSH adapter that emits the standard usage chunk is tracked automatically. Provider/model/reasoning choices still come from the user's existing DSH model configuration.
+
+OpenAI Codex account quota remains available separately on the account page and through `/codex usage`; it is not mixed into session token analytics.
+
 
 ## Install
 

@@ -16,10 +16,15 @@
 - 为 Harness 现有 `read_image` 工具增加可选的 HTTP(S) URL 输入
 - 由 `gpt-image-2` 执行的 `imagegen` 工具，支持工作区／会话参考图和自动工作区输出
 - 复用 dsh Web 输入框的粘贴和拖放图片能力
-- 持久化的 request-level SQLite Usage Ledger，由按 session 跟踪的周额度 HUD 与设置页 Analytics 共用
-- 全局时间／模型／Reasoning 筛选、按模型堆叠的趋势图、Task／Session 明细以及不含 Credit 的 JSON 报告
+- 持久化、provider-neutral 的 SQLite Usage Ledger，由当前 session HUD 与设置页 **LLM Usage** 共用
+- Provider／时间／精确模型／Reasoning 筛选、Task／Session 明细以及不含账户额度的 JSON 报告
 
 ChatGPT 订阅认证与按量计费的 OpenAI API 是不同产品。本插件只使用 ChatGPT Codex 后端，不会把订阅转换成通用 OpenAI API 凭据。
+
+**LLM Usage** 只统计 DSH 标准化流为当前 session 返回的 token，不查询账户余额或厂商额度。适配器返回哪些字段，就分别记录未缓存输入、缓存输入、输出、推理和总 token。当前已覆盖 DeepSeek、OpenCode Go、Kimi；其他能够发出 DSH 标准 usage chunk 的适配器也会自动纳入统计。Provider、模型与思考程度仍从用户已有的 DSH 模型配置中读取。
+
+OpenAI Codex 的账户额度仍单独保留在账号页面和 `/codex usage`，不会混入 session token Analytics。
+
 
 ## 安装
 

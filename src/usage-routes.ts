@@ -45,21 +45,23 @@ function filters(req: IncomingMessage): UsageFilters {
     if (!Number.isFinite(value) || value < 0) throw new Error(`invalid ${name}`)
     return value
   }
-  const list = (name: string): string[] | undefined => {
+  const list = (name: string, lowercase = false): string[] | undefined => {
     const values = url.searchParams.getAll(name)
       .flatMap(value => value.split(','))
-      .map(value => value.trim().toLowerCase())
+      .map(value => lowercase ? value.trim().toLowerCase() : value.trim())
       .filter(Boolean)
     return values.length === 0 ? undefined : [...new Set(values)]
   }
   const start = numeric('start')
   const end = numeric('end')
+  const providers = list('provider')
   const models = list('model')
-  const reasoning = list('reasoning')
+  const reasoning = list('reasoning', true)
   return {
     range: requestedRange as UsageRange,
     ...start === undefined ? {} : { start },
     ...end === undefined ? {} : { end },
+    ...providers === undefined ? {} : { providers },
     ...models === undefined ? {} : { models },
     ...reasoning === undefined ? {} : { reasoning },
   }
@@ -110,7 +112,8 @@ export function registerOpenAICodexUsageRoutes(ctx: Context, service: OpenAICode
           const query = filters(req)
           if (path === '/summary') return json(res, 200, await ledger.summary(query))
           if (path === '/timeseries') return json(res, 200, await ledger.usageOverTime(query))
-          if (path === '/models') return json(res, 200, await ledger.breakdown('model_family', query))
+          if (path === '/providers') return json(res, 200, await ledger.breakdown('provider', query))
+          if (path === '/models') return json(res, 200, await ledger.breakdown('model', query))
           if (path === '/reasoning') return json(res, 200, await ledger.breakdown('reasoning_effort', query))
           if (path === '/tasks') return json(res, 200, await ledger.tasks(query))
           if (path === '/sessions') return json(res, 200, await ledger.sessions(query))
@@ -119,7 +122,6 @@ export function registerOpenAICodexUsageRoutes(ctx: Context, service: OpenAICode
             if (sessionId === null || sessionId === '') return json(res, 400, { error: 'sessionId is required' })
             return json(res, 200, {
               session: await ledger.sessionUsage(sessionId) ?? null,
-              quota: await ledger.latestQuota(),
               ...service.usageUiPreferences(),
             })
           }
@@ -127,7 +129,6 @@ export function registerOpenAICodexUsageRoutes(ctx: Context, service: OpenAICode
             return json(res, 200, {
               tracker: service.usageTracker.snapshot(),
               task: await service.usageTracker.currentTask() ?? null,
-              quota: await ledger.latestQuota(),
               hudVisible: service.usageUiPreferences().showUsageHud,
             })
           }

@@ -80,6 +80,38 @@ describe('Codex usage ledger', () => {
     expect(await tracker.ledger.latestTask()).toBeUndefined()
   })
 
+
+  it('migrates an existing Codex-only ledger before creating provider indexes', async () => {
+    root ??= await mkdtemp(join(tmpdir(), 'dsh-codex-migration-'))
+    const filename = join(root, 'usage.sqlite3')
+    const legacy = new DatabaseSync(filename)
+    legacy.exec(`CREATE TABLE codex_usage_events (
+      timestamp INTEGER NOT NULL, duration_ms INTEGER NOT NULL DEFAULT 0, request_id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL, session_id TEXT NOT NULL, conversation_id TEXT NOT NULL, run_id TEXT, step INTEGER,
+      model TEXT NOT NULL, model_family TEXT NOT NULL, reasoning_effort TEXT NOT NULL, service_tier TEXT,
+      fast_mode INTEGER NOT NULL, input_tokens INTEGER NOT NULL, cached_input_tokens INTEGER NOT NULL,
+      cache_write_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, reasoning_tokens INTEGER NOT NULL,
+      total_tokens INTEGER NOT NULL, server_credits REAL, calculated_credits REAL,
+      credit_source TEXT NOT NULL, rate_card_id TEXT
+    ) STRICT`)
+    legacy.close()
+
+    const value = new CodexUsageLedger(filename)
+    await value.open()
+    openLedgers.push(value)
+    const audit = new DatabaseSync(filename, { readOnly: true })
+    expect(audit.prepare('PRAGMA table_info(codex_usage_events)').all())
+      .toEqual(expect.arrayContaining([expect.objectContaining({ name: 'provider' })]))
+    expect(audit.prepare('PRAGMA index_list(codex_usage_events)').all())
+      .toEqual(expect.arrayContaining([expect.objectContaining({ name: 'codex_usage_events_provider_filters' })]))
+    audit.close()
+
+    await value.record({
+      timestamp: 1_000, requestId: 'deepseek-after-migration', correlation: correlation('migrated-task'),
+      provider: 'deepseek', model: 'deepseek-reasoner', usage: { inputTokens: 9, outputTokens: 1 },
+    })
+    expect(await value.breakdown('provider', { range: 'all' })).toMatchObject([{ key: 'deepseek', totalTokens: 10 }])
+  })
   it('hides legacy empty rows from every analytics projection without deleting them', async () => {
     const value = await ledger()
     const legacy = new DatabaseSync(value.filename)
@@ -160,7 +192,7 @@ describe('Codex usage ledger', () => {
     const value = await ledger()
     await value.record({ timestamp: 1_000, requestId: 'sol', correlation: correlation('sol-task'), model: 'gpt-5.6-sol', reasoningEffort: 'max', serverCredits: 2, usage: { inputTokens: 10, outputTokens: 1 } })
     await value.record({ timestamp: 2_000, requestId: 'terra', correlation: correlation('terra-task'), model: 'gpt-5.6-terra', reasoningEffort: 'high', serverCredits: 3, usage: { inputTokens: 20, outputTokens: 2 } })
-    const filters = { range: 'custom' as const, start: 500, end: 1_500, models: ['sol'], reasoning: ['max'] }
+    const filters = { range: 'custom' as const, start: 500, end: 1_500, models: ['gpt-5.6-sol'], reasoning: ['max'] }
     expect(await value.summary(filters)).toMatchObject({ totalTokens: 11, credits: 2, requests: 1, tasks: 1 })
     expect(await value.breakdown('model_family', filters)).toHaveLength(1)
     expect(await value.usageOverTime(filters)).toHaveLength(1)

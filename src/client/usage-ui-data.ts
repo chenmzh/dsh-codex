@@ -3,6 +3,7 @@ import type { QuotaSnapshot, SessionUsage, TaskUsage, UsageBreakdownRow, UsageTi
 export interface AnalyticsPayload {
   summary: UsageTotals
   timeseries: UsageTimePoint[]
+  providers?: UsageBreakdownRow[]
   models: UsageBreakdownRow[]
   reasoning: UsageBreakdownRow[]
   tasks: TaskUsage[]
@@ -24,6 +25,7 @@ export interface CodexHudModelDirectory {
 }
 export interface UsageReportFilters {
   range: string
+  providers?: string[]
   models: string[]
   reasoning: string[]
   start: string
@@ -45,6 +47,10 @@ function visibleTotals(value: UsageTotals) {
   }
 }
 
+export function isUsageSelection(selection: ModelSelectionSnapshot['current']): boolean {
+  return selection !== null && selection.provider.length > 0 && selection.model.length > 0
+}
+
 export function isOpenAICodexSelection(selection: ModelSelectionSnapshot['current']): boolean {
   return selection?.provider === 'openai-codex'
 }
@@ -60,17 +66,19 @@ export function createUsageReport(data: AnalyticsPayload, filters: UsageReportFi
     endedAtIso: new Date(row.endedAt).toISOString(),
     durationMs: row.durationMs,
     model: row.model,
+    provider: row.provider,
     modelFamily: row.modelFamily,
     reasoningEffort: row.reasoningEffort,
     ...'taskId' in row ? { taskId: row.taskId } : {},
   }))
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt: new Date(generatedAt).toISOString(),
     filters: {
       range: filters.range,
       models: [...filters.models],
       reasoning: [...filters.reasoning],
+      providers: [...(filters.providers ?? [])],
       visualizationMetric: filters.metric ?? 'tokens',
       ...filters.range === 'custom' && filters.start !== '' ? { start: new Date(filters.start).toISOString() } : {},
       ...filters.range === 'custom' && filters.end !== '' ? { end: new Date(filters.end + 'T23:59:59.999').toISOString() } : {},
@@ -79,24 +87,14 @@ export function createUsageReport(data: AnalyticsPayload, filters: UsageReportFi
     usageOverTime: data.timeseries.map(point => ({
       timestamp: point.timestamp,
       time: new Date(point.timestamp).toISOString(),
-      modelFamily: point.modelFamily,
+      provider: point.provider,
       tokens: point.tokens,
       requests: point.requests,
     })),
     modelBreakdown: breakdown(data.models),
     reasoningBreakdown: breakdown(data.reasoning),
     thisWeek: { summary: visibleTotals(data.weekly), modelBreakdown: breakdown(data.weeklyModels) },
-    accountQuota: data.quota.map(item => ({
-      timestamp: item.timestamp,
-      time: new Date(item.timestamp).toISOString(),
-      quotaId: item.quotaId,
-      quotaName: item.quotaName ?? null,
-      windowSeconds: item.windowSeconds,
-      usedPercent: item.usedPercent,
-      remainingPercent: item.remainingPercent,
-      resetAt: item.resetAt ?? null,
-      resetAtIso: item.resetAt === undefined ? null : new Date(item.resetAt).toISOString(),
-    })),
+    providerBreakdown: breakdown(data.providers ?? []),
     recentTasks: aggregate(data.tasks),
     sessions: aggregate(data.sessions),
   }

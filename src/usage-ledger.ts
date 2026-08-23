@@ -1,4 +1,4 @@
-/** Persistent, request-level Codex usage ledger and backend aggregations. */
+/** Persistent, provider-neutral request usage ledger and backend aggregations. */
 
 import { randomUUID } from 'node:crypto'
 import { mkdir } from 'node:fs/promises'
@@ -18,6 +18,7 @@ export interface UsageFilters {
   range?: UsageRange
   start?: number
   end?: number
+  providers?: readonly string[]
   models?: readonly string[]
   reasoning?: readonly string[]
 }
@@ -35,6 +36,7 @@ export interface RecordCodexUsage {
   durationMs?: number
   requestId?: string
   correlation: UsageCorrelation
+  provider?: string
   model: string
   reasoningEffort?: string
   serviceTier?: string | undefined
@@ -51,6 +53,7 @@ export interface CodexUsageEvent {
   sessionId: string
   conversationId: string
   runId?: string | undefined
+  provider: string
   model: string
   modelFamily: CodexModelFamily
   reasoningEffort: string
@@ -103,6 +106,7 @@ export interface UsageBreakdownRow extends UsageTotals {
 
 export interface UsageTimePoint {
   timestamp: number
+  provider: string
   modelFamily: CodexModelFamily
   tokens: number
   credits: number | null
@@ -116,6 +120,7 @@ export interface TaskUsage extends UsageTotals {
   startedAt: number
   endedAt: number
   durationMs: number
+  provider: string
   model: string
   modelFamily: CodexModelFamily | 'mixed'
   reasoningEffort: string
@@ -130,6 +135,7 @@ export interface SessionUsage extends UsageTotals {
   startedAt: number
   endedAt: number
   durationMs: number
+  provider: string
   model: string
   modelFamily: CodexModelFamily | 'mixed'
   reasoningEffort: string
@@ -212,9 +218,13 @@ function filterSql(filters: UsageFilters, alias = 'e'): { sql: string; values: A
     clauses.push(`${alias}.timestamp <= ?`)
     values.push(bounds.end)
   }
+  if (filters.providers !== undefined && filters.providers.length > 0) {
+    clauses.push(`${alias}.provider IN (${filters.providers.map(() => '?').join(', ')})`)
+    values.push(...filters.providers)
+  }
   if (filters.models !== undefined && filters.models.length > 0) {
-    clauses.push(`${alias}.model_family IN (${filters.models.map(() => '?').join(', ')})`)
-    values.push(...filters.models.map(value => value.toLowerCase()))
+    clauses.push(`${alias}.model IN (${filters.models.map(() => '?').join(', ')})`)
+    values.push(...filters.models)
   }
   if (filters.reasoning !== undefined && filters.reasoning.length > 0) {
     clauses.push(`${alias}.reasoning_effort IN (${filters.reasoning.map(() => '?').join(', ')})`)
@@ -283,6 +293,7 @@ function eventFromRow(row: Row): CodexUsageEvent {
     sessionId: text(row, 'session_id'),
     conversationId: text(row, 'conversation_id'),
     ...optional('run_id') === undefined ? {} : { runId: optional('run_id') },
+    provider: text(row, 'provider'),
     model: text(row, 'model'),
     modelFamily: text(row, 'model_family') as CodexModelFamily,
     reasoningEffort: text(row, 'reasoning_effort'),
@@ -352,6 +363,7 @@ export class CodexUsageLedger {
           conversation_id TEXT NOT NULL,
           run_id TEXT,
           step INTEGER,
+          provider TEXT NOT NULL DEFAULT 'openai-codex',
           model TEXT NOT NULL,
           model_family TEXT NOT NULL,
           reasoning_effort TEXT NOT NULL,
@@ -372,8 +384,6 @@ export class CodexUsageLedger {
         CREATE INDEX IF NOT EXISTS codex_usage_events_time ON codex_usage_events(timestamp);
         CREATE INDEX IF NOT EXISTS codex_usage_events_task ON codex_usage_events(task_id, timestamp);
         CREATE INDEX IF NOT EXISTS codex_usage_events_session ON codex_usage_events(session_id, timestamp);
-        CREATE INDEX IF NOT EXISTS codex_usage_events_filters
-          ON codex_usage_events(model_family, reasoning_effort, timestamp);
         CREATE TABLE IF NOT EXISTS codex_quota_snapshots (
           timestamp INTEGER NOT NULL,
           quota_id TEXT NOT NULL,
@@ -394,6 +404,11 @@ export class CodexUsageLedger {
       if (!eventColumns.some(row => text(row, 'name') === 'duration_ms')) {
         db.exec('ALTER TABLE codex_usage_events ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0')
       }
+      if (!eventColumns.some(row => text(row, 'name') === 'provider')) {
+        db.exec("ALTER TABLE codex_usage_events ADD COLUMN provider TEXT NOT NULL DEFAULT 'openai-codex'")
+      }
+      db.exec('CREATE INDEX IF NOT EXISTS codex_usage_events_provider_filters '
+        + 'ON codex_usage_events(provider, model, reasoning_effort, timestamp)')
       this.db = db
       return db
     })()
@@ -459,6 +474,7 @@ export class CodexUsageLedger {
       conversationId: input.correlation.conversationId,
       ...input.correlation.runId === undefined ? {} : { runId: input.correlation.runId },
       model: input.model,
+      provider: input.provider ?? 'openai-codex',
       modelFamily: classifyCodexModel(input.model),
       reasoningEffort: (input.reasoningEffort ?? 'none').toLowerCase(),
       ...input.serviceTier === undefined ? {} : { serviceTier: input.serviceTier },
@@ -476,12 +492,12 @@ export class CodexUsageLedger {
     }
     db.prepare(`INSERT OR IGNORE INTO codex_usage_events (
       timestamp, duration_ms, request_id, task_id, session_id, conversation_id, run_id, step,
-      model, model_family, reasoning_effort, service_tier, fast_mode,
+      provider, model, model_family, reasoning_effort, service_tier, fast_mode,
       input_tokens, cached_input_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens,
       server_credits, calculated_credits, credit_source, rate_card_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(event.timestamp, event.durationMs, event.requestId, event.taskId, event.sessionId, event.conversationId,
-        event.runId ?? null, input.correlation.step ?? null, event.model, event.modelFamily,
+        event.runId ?? null, input.correlation.step ?? null, event.provider, event.model, event.modelFamily,
         event.reasoningEffort, event.serviceTier ?? null, event.fastMode ? 1 : 0,
         event.inputTokens, event.cachedInputTokens, event.cacheWriteTokens, event.outputTokens,
         event.reasoningTokens, event.totalTokens, event.serverCredits ?? null,
@@ -496,7 +512,7 @@ export class CodexUsageLedger {
       .get(...where.values) as Row)
   }
 
-  async breakdown(column: 'model_family' | 'reasoning_effort', filters: UsageFilters = {}): Promise<UsageBreakdownRow[]> {
+  async breakdown(column: 'provider' | 'model' | 'model_family' | 'reasoning_effort', filters: UsageFilters = {}): Promise<UsageBreakdownRow[]> {
     const db = await this.database()
     const where = filterSql(filters)
     const rows = db.prepare(`SELECT e.${column} AS key, ${TOTAL_COLUMNS}
@@ -514,17 +530,18 @@ export class CodexUsageLedger {
       : span <= 90 * 86_400_000 ? 86_400_000
         : span <= 730 * 86_400_000 ? 7 * 86_400_000 : 30 * 86_400_000
     const rows = db.prepare(`SELECT CAST(e.timestamp / ? AS INTEGER) * ? AS bucket,
-      e.model_family, COALESCE(SUM(e.total_tokens), 0) AS tokens,
+      e.provider, COALESCE(SUM(e.total_tokens), 0) AS tokens,
       COALESCE(SUM(COALESCE(e.server_credits, e.calculated_credits)), 0) AS known_credits,
       COALESCE(SUM(CASE WHEN e.credit_source = 'unknown' THEN 1 ELSE 0 END), 0) AS unknown_credit_requests,
       COUNT(*) AS requests FROM codex_usage_events e ${where.sql}
-      GROUP BY bucket, e.model_family ORDER BY bucket ASC, e.model_family ASC`)
+      GROUP BY bucket, e.provider ORDER BY bucket ASC, e.provider ASC`)
       .all(bucket, bucket, ...where.values) as Row[]
     return rows.map(row => ({
       timestamp: number(row, 'bucket'),
-      modelFamily: text(row, 'model_family') as CodexModelFamily,
+      provider: text(row, 'provider'),
       tokens: number(row, 'tokens'),
       credits: number(row, 'unknown_credit_requests') === 0 ? number(row, 'known_credits') : null,
+      modelFamily: classifyCodexModel(text(row, 'provider')),
       unknownCreditRequests: number(row, 'unknown_credit_requests'),
       requests: number(row, 'requests'),
     }))
@@ -535,6 +552,7 @@ export class CodexUsageLedger {
     const where = filterSql(filters)
     const rows = db.prepare(`SELECT e.task_id, MIN(e.session_id) AS session_id,
       MIN(e.timestamp - e.duration_ms) AS started_at, MAX(e.timestamp) AS ended_at,
+      CASE WHEN COUNT(DISTINCT e.provider) = 1 THEN MIN(e.provider) ELSE 'mixed' END AS provider,
       CASE WHEN COUNT(DISTINCT e.model) = 1 THEN MIN(e.model) ELSE 'Mixed' END AS model,
       CASE WHEN COUNT(DISTINCT e.model_family) = 1 THEN MIN(e.model_family) ELSE 'mixed' END AS model_family,
       CASE WHEN COUNT(DISTINCT e.reasoning_effort) = 1 THEN MIN(e.reasoning_effort) ELSE 'mixed' END AS reasoning_effort,
@@ -548,7 +566,7 @@ export class CodexUsageLedger {
       const endedAt = number(row, 'ended_at')
       return {
         taskId: text(row, 'task_id'), sessionId: text(row, 'session_id'), startedAt, endedAt,
-        durationMs: Math.max(0, endedAt - startedAt), model: text(row, 'model'),
+        durationMs: Math.max(0, endedAt - startedAt), provider: text(row, 'provider'), model: text(row, 'model'),
         modelFamily: text(row, 'model_family') as CodexModelFamily | 'mixed',
         reasoningEffort: text(row, 'reasoning_effort'),
         weeklyShare: allowance === null || credits === null ? null : credits / allowance * 100,
@@ -563,6 +581,7 @@ export class CodexUsageLedger {
     const where = filterSql(filters)
     const rows = db.prepare(`SELECT e.session_id, MIN(e.timestamp - e.duration_ms) AS started_at,
       MAX(e.timestamp) AS ended_at,
+      CASE WHEN COUNT(DISTINCT e.provider) = 1 THEN MIN(e.provider) ELSE 'mixed' END AS provider,
       CASE WHEN COUNT(DISTINCT e.model) = 1 THEN MIN(e.model) ELSE 'Mixed' END AS model,
       CASE WHEN COUNT(DISTINCT e.model_family) = 1 THEN MIN(e.model_family) ELSE 'mixed' END AS model_family,
       CASE WHEN COUNT(DISTINCT e.reasoning_effort) = 1 THEN MIN(e.reasoning_effort) ELSE 'mixed' END AS reasoning_effort,
@@ -576,6 +595,7 @@ export class CodexUsageLedger {
     const db = await this.database()
     const row = db.prepare(`SELECT e.session_id, MIN(e.timestamp - e.duration_ms) AS started_at,
       MAX(e.timestamp) AS ended_at,
+      CASE WHEN COUNT(DISTINCT e.provider) = 1 THEN MIN(e.provider) ELSE 'mixed' END AS provider,
       CASE WHEN COUNT(DISTINCT e.model) = 1 THEN MIN(e.model) ELSE 'Mixed' END AS model,
       CASE WHEN COUNT(DISTINCT e.model_family) = 1 THEN MIN(e.model_family) ELSE 'mixed' END AS model_family,
       CASE WHEN COUNT(DISTINCT e.reasoning_effort) = 1 THEN MIN(e.reasoning_effort) ELSE 'mixed' END AS reasoning_effort,
@@ -590,7 +610,7 @@ export class CodexUsageLedger {
     const aggregate = totals(row)
     return {
       sessionId: text(row, 'session_id'), startedAt, endedAt,
-      durationMs: Math.max(0, endedAt - startedAt), model: text(row, 'model'),
+      durationMs: Math.max(0, endedAt - startedAt), provider: text(row, 'provider'), model: text(row, 'model'),
       modelFamily: text(row, 'model_family') as CodexModelFamily | 'mixed',
       reasoningEffort: text(row, 'reasoning_effort'),
       weeklyShare: allowance === null || aggregate.credits === null ? null : aggregate.credits / allowance * 100,
@@ -610,6 +630,7 @@ export class CodexUsageLedger {
     const db = await this.database()
     const row = db.prepare(`SELECT e.task_id, MIN(e.session_id) AS session_id,
       MIN(e.timestamp - e.duration_ms) AS started_at, MAX(e.timestamp) AS ended_at,
+      CASE WHEN COUNT(DISTINCT e.provider) = 1 THEN MIN(e.provider) ELSE 'mixed' END AS provider,
       CASE WHEN COUNT(DISTINCT e.model) = 1 THEN MIN(e.model) ELSE 'Mixed' END AS model,
       CASE WHEN COUNT(DISTINCT e.model_family) = 1 THEN MIN(e.model_family) ELSE 'mixed' END AS model_family,
       CASE WHEN COUNT(DISTINCT e.reasoning_effort) = 1 THEN MIN(e.reasoning_effort) ELSE 'mixed' END AS reasoning_effort,
@@ -622,7 +643,7 @@ export class CodexUsageLedger {
     const endedAt = number(row, 'ended_at')
     return [{
       taskId, sessionId: text(row, 'session_id'), startedAt, endedAt,
-      durationMs: Math.max(0, endedAt - startedAt), model: text(row, 'model'),
+      durationMs: Math.max(0, endedAt - startedAt), provider: text(row, 'provider'), model: text(row, 'model'),
       modelFamily: text(row, 'model_family') as CodexModelFamily | 'mixed',
       reasoningEffort: text(row, 'reasoning_effort'),
       weeklyShare: allowance === null || credits === null ? null : credits / allowance * 100,

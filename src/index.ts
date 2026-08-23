@@ -70,6 +70,7 @@ import { OpenAICodexCredentialStore, OPENAI_CODEX_PROVIDER } from './store.ts'
 import { OpenAICodexService } from './service.ts'
 import { OPENAI_CODEX_REASONING_SUMMARIES } from './tool-policy.ts'
 import type { OpenAICodexReasoningSummary } from './tool-policy.ts'
+import { installProviderUsageTracking } from './usage-middleware.ts'
 
 export { OpenAICodexService } from './service.ts'
 export {
@@ -94,6 +95,8 @@ export type {
   UsageTotals,
 } from './usage-ledger.ts'
 export type { OpenAICodexServiceOptions } from './service.ts'
+export { captureProviderUsage, installProviderUsageTracking } from './usage-middleware.ts'
+export type { UsageCaptureInternals } from './usage-middleware.ts'
 
 export { loginOpenAICodex, logoutOpenAICodex, openAICodexAuthStatus } from './auth.ts'
 export type { OpenAICodexAuthStatus } from './auth.ts'
@@ -179,6 +182,7 @@ export function apply(ctx: Context, config: Config): void {
   const credentials = service.credentials
   const imageTools = service.policy
   const usageTracker = service.usageTracker
+  installProviderUsageTracking(ctx, usageTracker, new Set([OPENAI_CODEX_PROVIDER]))
   ctx.provide('openAICodex', service)
   ctx.inject(['settings'], settingsCtx => { service.attachSettings(settingsCtx) })
   ctx.llm.registerAdapter(
@@ -211,7 +215,6 @@ export function apply(ctx: Context, config: Config): void {
     })
     agentCtx.on('agent/turn-stopping', payload => {
       usageTracker.finishTask(String(payload.agent.id), payload.turn)
-      void service.usage().catch(() => undefined)
     })
   })
   ctx.inject(['tools', 'fs', 'attachments'], toolCtx => {

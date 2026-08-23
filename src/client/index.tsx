@@ -1,4 +1,4 @@
-/** Browser half: OpenAI Codex account management inside dsh Settings. */
+/** Browser half: OpenAI Codex account management and provider-neutral usage UI. */
 
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
@@ -11,7 +11,7 @@ import { OpenAICodexSettings } from './OpenAICodexSettings.tsx'
 import type { OpenAICodexSettingsInjected } from './OpenAICodexSettings.tsx'
 import { ImagegenToolView } from './ImagegenToolView.tsx'
 import type { ImageLoader } from './ImagegenToolView.tsx'
-import { CodexUsageAnalyticsSettings, CodexUsageHud } from './CodexUsageSurface.tsx'
+import { CodexUsageAnalyticsSettings, CodexUsageHud } from './LlmUsageSurface.tsx'
 import type { CodexHudModelDirectory } from './usage-ui-data.ts'
 import { en, zh } from './locales.ts'
 import type { OpenAICodexSettingsKey } from './locales.ts'
@@ -73,13 +73,13 @@ export function apply(ctx: ClientContext): void {
   }, OpenAICodexSettings))
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
-    id: 'openai-codex-usage',
+    id: 'llm-usage',
     order: 16,
-    label: 'Codex Usage',
+    label: 'LLM Usage',
   }, CodexUsageAnalyticsSettings))
   ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
     name: 'conversation.input.dock',
-    id: 'openai-codex-usage-hud',
+    id: 'llm-usage-hud',
     order: 100,
     inject: (sessionId: SessionId): { modelDirectory: CodexHudModelDirectory } => ({ modelDirectory: modelDirectories.directoryFor(sessionId) }),
   }, CodexUsageHud))
