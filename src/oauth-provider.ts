@@ -1,23 +1,6 @@
 import type { OAuthCredential } from '@earendil-works/pi-ai'
-import { registerBunOAuthFlows } from '@earendil-works/pi-ai/bun-oauth'
 import { openaiCodexProvider as piOpenaiCodexProvider } from '@earendil-works/pi-ai/providers/openai-codex'
-
-let oauthFlowsRegistered = false
-
-/**
- * Register pi-ai's static OAuth loaders before constructing the provider.
- *
- * pi-ai's default loader derives a relative module URL from `import.meta.url`.
- * Some long-lived native-loader/HMR graphs can evaluate that helper without
- * the metadata value, so use pi-ai's own static registration seam.
- * Registration is process-global and idempotent.
- */
-export function ensureBunOAuthFlows(): void {
-  if (!oauthFlowsRegistered) {
-    registerBunOAuthFlows()
-    oauthFlowsRegistered = true
-  }
-}
+import { createOpenAICodexProvider } from './provider.ts'
 
 // Match pi-ai 0.84.4's Codex OAuth client and refresh grant. Keep login UI,
 // cancellation, auth resolution and expiry scheduling owned by pi-ai.
@@ -75,8 +58,7 @@ export async function refreshOpenAICodexCredential(
 
 /** Provider-local OAuth override: no global fetch hook or dependency mutation. */
 export function openaiCodexProvider(requestFetch?: typeof globalThis.fetch): ReturnType<typeof piOpenaiCodexProvider> {
-  ensureBunOAuthFlows()
-  const provider = piOpenaiCodexProvider()
+  const provider = createOpenAICodexProvider()
   const oauth = provider.auth.oauth!
   return {
     ...provider,
@@ -89,10 +71,9 @@ export function openaiCodexProvider(requestFetch?: typeof globalThis.fetch): Ret
           const credential = await oauth.login(interaction)
           // pi-ai's code exchange also drops id_token. One refresh obtains the
           // complete set before Models.login persists anything to the store.
-          const timeoutSignal = AbortSignal.timeout(15_000)
-          return refreshOpenAICodexCredential(credential, interaction.signal === undefined
-            ? timeoutSignal
-            : AbortSignal.any([interaction.signal, timeoutSignal]), requestFetch)
+          return refreshOpenAICodexCredential(credential, AbortSignal.any([
+            interaction.signal, AbortSignal.timeout(15_000),
+          ]), requestFetch)
         },
       },
     },

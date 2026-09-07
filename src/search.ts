@@ -15,6 +15,7 @@ import type {
 } from '@deepseek-ai/dsh-web'
 import type { OpenAICodexCredentialStore } from './store.ts'
 import { OPENAI_CODEX_PROVIDER } from './store.ts'
+import { createOpenAICodexProvider } from './provider.ts'
 
 /** Stable dsh web-provider id selected by the bundle patch. */
 export const OPENAI_CODEX_SEARCH_PROVIDER = OPENAI_CODEX_PROVIDER
@@ -46,11 +47,13 @@ export type OpenAICodexSearchContextSize = 'low' | 'medium' | 'high'
 interface SearchRequestBody {
   readonly id: string
   readonly model: string
-  readonly input: readonly [{
-    readonly type: 'message'
-    readonly role: 'user'
-    readonly content: readonly [{ readonly type: 'input_text'; readonly text: string }]
-  }]
+  readonly input: readonly [
+    {
+      readonly type: 'message'
+      readonly role: 'user'
+      readonly content: readonly [{ readonly type: 'input_text'; readonly text: string }]
+    },
+  ]
   readonly commands: {
     readonly search_query: readonly [{ readonly q: string }]
   }
@@ -74,6 +77,7 @@ export interface OpenAICodexSearchRequestRecord {
 export interface OpenAICodexSearchProviderOptions {
   /** Shared persistent OAuth store. */
   readonly credentials: OpenAICodexCredentialStore
+  readonly resolveCredentials?: () => Promise<OpenAICodexCredentialStore>
   /** Request transport used after credentials have been resolved. */
   readonly fetch?: typeof globalThis.fetch
   /** Model sent to the standalone search endpoint. */
@@ -93,9 +97,12 @@ export interface OpenAICodexSearchProviderOptions {
 /** Convert the configured mode to the official endpoint field. */
 function externalWebAccess(mode: OpenAICodexSearchMode): boolean | 'indexed' {
   switch (mode) {
-    case 'cached': return false
-    case 'indexed': return 'indexed'
-    case 'live': return true
+    case 'cached':
+      return false
+    case 'indexed':
+      return 'indexed'
+    case 'live':
+      return true
   }
 }
 
@@ -106,12 +113,17 @@ function accountIdFromToken(access: string): string {
     if (parts.length !== 3 || parts[1] === undefined) throw new Error('invalid JWT')
     const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as Record<string, unknown>
     const auth = payload['https://api.openai.com/auth']
-    if (typeof auth !== 'object' || auth === null || Array.isArray(auth)) throw new Error('missing auth claim')
+    if (typeof auth !== 'object' || auth === null || Array.isArray(auth))
+      throw new Error('missing auth claim')
     const accountId = (auth as Record<string, unknown>)['chatgpt_account_id']
     if (typeof accountId !== 'string' || accountId.length === 0) throw new Error('missing account id')
     return accountId
   } catch (error: unknown) {
-    throw new WebError('OpenAI Codex search credential has no usable account id; run "dsh openai-codex login" again', 'WEB_PROVIDER_CREDENTIAL_MISSING', { cause: error })
+    throw new WebError(
+      'OpenAI Codex search credential has no usable account id; run "dsh openai-codex login" again',
+      'WEB_PROVIDER_CREDENTIAL_MISSING',
+      { cause: error },
+    )
   }
 }
 
@@ -164,12 +176,12 @@ export function mapOpenAICodexSearchResponse(value: unknown): WebSearchResult {
     const snippet = optionalString(item, 'snippet')
     sources.push({
       url,
-      ...title === undefined ? {} : { title },
-      ...snippet === undefined ? {} : { snippet },
+      ...(title === undefined ? {} : { title }),
+      ...(snippet === undefined ? {} : { snippet }),
     })
   }
   return {
-    ...output.length === 0 ? {} : { content: output },
+    ...(output.length === 0 ? {} : { content: output }),
     sources,
     truncated: false,
   }
@@ -197,7 +209,9 @@ function abortable<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (signal === undefined) return operation
   if (signal.aborted) return Promise.reject(searchAborted(signal))
   return new Promise<T>((resolve, reject) => {
-    const onAbort = (): void => { reject(searchAborted(signal)) }
+    const onAbort = (): void => {
+      reject(searchAborted(signal))
+    }
     signal.addEventListener('abort', onAbort, { once: true })
     void operation.then(
       (value) => {
@@ -216,11 +230,14 @@ function abortable<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
 function providerMessage(value: unknown): string | undefined {
   if (!isRecord(value)) return undefined
   const error = value['error']
-  const raw = typeof error === 'string'
-    ? error
-    : isRecord(error) && typeof error['message'] === 'string'
-      ? error['message']
-      : typeof value['message'] === 'string' ? value['message'] : undefined
+  const raw =
+    typeof error === 'string'
+      ? error
+      : isRecord(error) && typeof error['message'] === 'string'
+        ? error['message']
+        : typeof value['message'] === 'string'
+          ? value['message']
+          : undefined
   return raw?.replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/gu, '[REDACTED]').slice(0, 1000)
 }
 
@@ -240,9 +257,11 @@ export class OpenAICodexSearchProvider implements WebSearchProvider {
 
   /** The local configuration is usable; credential presence is resolved per request. */
   available(): boolean {
-    return this.options.model.length > 0
-      && Number.isInteger(this.options.maxOutputTokens)
-      && this.options.maxOutputTokens > 0
+    return (
+      this.options.model.length > 0 &&
+      Number.isInteger(this.options.maxOutputTokens) &&
+      this.options.maxOutputTokens > 0
+    )
   }
 
   /** @inheritdoc */
@@ -250,15 +269,27 @@ export class OpenAICodexSearchProvider implements WebSearchProvider {
     throwIfSearchAborted(signal)
     let auth
     try {
-      auth = await abortable(this.models.getAuth(OPENAI_CODEX_PROVIDER), signal)
+      let models = this.models
+      if (this.options.resolveCredentials !== undefined) {
+        const credentials = await abortable(this.options.resolveCredentials(), signal)
+        const selectedModels = createModels({ credentials })
+        selectedModels.setProvider(openaiCodexProvider(this.options.fetch))
+        models = selectedModels
+      }
+      auth = await abortable(models.getAuth(OPENAI_CODEX_PROVIDER), signal)
     } catch (error: unknown) {
       throwIfSearchAborted(signal)
       if (isAbortError(error)) throw searchAborted(signal, error)
-      throw new WebError('OpenAI Codex search credential resolution failed', 'WEB_PROVIDER_ERROR', { cause: error })
+      throw new WebError('OpenAI Codex search credential resolution failed', 'WEB_PROVIDER_ERROR', {
+        cause: error,
+      })
     }
     const access = auth?.auth.apiKey
     if (access === undefined || access.length === 0) {
-      throw new WebError('OpenAI Codex search is signed out; run "dsh openai-codex login"', 'WEB_PROVIDER_CREDENTIAL_MISSING')
+      throw new WebError(
+        'OpenAI Codex search is signed out; run "dsh openai-codex login"',
+        'WEB_PROVIDER_CREDENTIAL_MISSING',
+      )
     }
     const accountId = accountIdFromToken(access)
     throwIfSearchAborted(signal)
@@ -266,11 +297,13 @@ export class OpenAICodexSearchProvider implements WebSearchProvider {
     const body: SearchRequestBody = {
       id: this.options.resolveRequestId(),
       model: this.options.model,
-      input: [{
-        type: 'message',
-        role: 'user',
-        content: [{ type: 'input_text', text: request.query }],
-      }],
+      input: [
+        {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: request.query }],
+        },
+      ],
       commands: { search_query: [{ q: request.query }] },
       settings: {
         search_context_size: this.options.contextSize,
@@ -295,7 +328,7 @@ export class OpenAICodexSearchProvider implements WebSearchProvider {
           originator: 'deepseek-harness',
         },
         body: JSON.stringify(body),
-        ...signal === undefined ? {} : { signal },
+        ...(signal === undefined ? {} : { signal }),
       })
     } catch (error: unknown) {
       throwIfSearchAborted(signal)
@@ -309,13 +342,18 @@ export class OpenAICodexSearchProvider implements WebSearchProvider {
     } catch (error: unknown) {
       throwIfSearchAborted(signal)
       if (isAbortError(error)) throw searchAborted(signal, error)
-      throw new WebError(`OpenAI Codex returned an unprocessable search response (HTTP ${response.status})`, 'WEB_PROVIDER_ERROR', { cause: error })
+      throw new WebError(
+        `OpenAI Codex returned an unprocessable search response (HTTP ${response.status})`,
+        'WEB_PROVIDER_ERROR',
+        { cause: error },
+      )
     }
     if (!response.ok) {
       const detail = providerMessage(payload)
-      const message = detail === undefined
-        ? `OpenAI Codex search failed (HTTP ${response.status})`
-        : `OpenAI Codex search failed (HTTP ${response.status}): ${detail}`
+      const message =
+        detail === undefined
+          ? `OpenAI Codex search failed (HTTP ${response.status})`
+          : `OpenAI Codex search failed (HTTP ${response.status}): ${detail}`
       throw new WebError(
         response.status === 401 || response.status === 403
           ? `${message}; run "dsh openai-codex login" again`

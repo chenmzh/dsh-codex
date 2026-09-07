@@ -138,7 +138,7 @@ describe("Codex model discovery", () => {
     );
     const adapter = createOpenAICodexAdapter(
       {} as OpenAICodexCredentialStore, () => undefined,
-      () => ({ reasoningSummary: "auto", useWebSocketContextReuse: false, useNativeCompaction: false }),
+      () => ({ reasoningSummary: 'auto',  useWebSocketContextReuse: false, useNativeCompaction: false }),
       undefined, () => policy.modelCatalogSnapshot().models,
       undefined, undefined, undefined, undefined, undefined, provider
     );
