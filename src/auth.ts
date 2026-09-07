@@ -5,8 +5,8 @@
 
 import { createModels } from '@earendil-works/pi-ai'
 import type { AuthInteraction } from '@earendil-works/pi-ai'
+import { openaiCodexProvider } from './oauth-provider.ts'
 import { OpenAICodexCredentialStore, OPENAI_CODEX_PROVIDER } from './store.ts'
-import { createOpenAICodexProvider } from './provider.ts'
 
 /** Non-secret login state shown by the launcher. */
 export interface OpenAICodexAuthStatus {
@@ -24,9 +24,10 @@ export interface OpenAICodexAuthStatus {
 export async function loginOpenAICodex(
   interaction: AuthInteraction,
   store: OpenAICodexCredentialStore = new OpenAICodexCredentialStore(),
+  requestFetch?: typeof globalThis.fetch,
 ): Promise<void> {
   const models = createModels({ credentials: store })
-  models.setProvider(createOpenAICodexProvider())
+  models.setProvider(openaiCodexProvider(requestFetch))
   await models.login(OPENAI_CODEX_PROVIDER, 'oauth', interaction)
 }
 
