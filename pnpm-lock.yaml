@@ -14,6 +14,9 @@ importers:
       undici:
         specifier: 8.10.0
         version: 8.10.0
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: link:/media/mingzhchen/新加卷/deepseek_workspace/13_dsh_auto_update/staging/dsh-web-upgrade-20260905/vendor/cordis

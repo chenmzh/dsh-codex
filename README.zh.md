@@ -29,6 +29,14 @@ ChatGPT 订阅认证与按量计费的 OpenAI API 是不同产品。本插件只
 OpenAI Codex 的账户额度仍单独保留在账号页面和 `/codex usage`，不会混入 session token Analytics。
 
 
+## 实时解码吞吐率（TPS）
+
+当前源码版已集成原独立 `dsh-live-tps` 宿主投影；可选的 `sessionProjections` 服务就绪时注册 `liveTps`（state version 1），没有该服务的宿主仍可正常使用其他功能。现有 Web Usage HUD 继续在会话输入区域的模型／token 信息行末尾显示 TPS，约五秒后隐藏过期读数；显示仍受 HUD 设置和模型／数据可用性影响，无需调整 UI 位置。
+
+投影不区分 provider，累计非空文本、推理及工具调用 delta，流式 token 按 `ceil(chars / 4)` 估算，首 token 后超过 500ms 才发布。消息结束时优先采用有效的 provider `outputTokens`，跨步骤只累计解码时段，不包含工具等待或首 token 延迟。轮次结束清空累计值，但保留 `{ tps, updatedAt }` 供客户端淡出；这不是账号额度或计费指标。
+
+**迁移顺序：**先完全禁用／卸载独立 `dsh-live-tps`，再加载／重载集成版，并移除其持久 profile 装配项，防止重启后恢复。两者拥有同一个 key；重叠注册会一直保留首个定义，直到所有引用释放。wire 结构和 state version 未变，保留现有投影缓存即可。下方旧版 Release 链接不代表这次源码集成已发布。
+
 ## 多账号
 
 在 DSH 的 **设置 → OpenAI Codex → 账号管理** 中，为每个账号填写名称并点击“添加账号”，再使用页面原有的浏览器登录或设备码登录。已有登录保留为“默认账号”，不需要重新登录。账号列表可选择当前使用的账号，也可修改名称；退出登录只影响当前账号。

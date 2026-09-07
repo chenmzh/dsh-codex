@@ -89,6 +89,7 @@ import { OpenAICodexService } from './service.ts'
 import { OPENAI_CODEX_REASONING_SUMMARIES } from './tool-policy.ts'
 import type { OpenAICodexReasoningSummary } from './tool-policy.ts'
 import { installProviderUsageTracking } from './usage-middleware.ts'
+import { installLiveTpsProjection } from './live-tps.ts'
 import { DEFAULT_PROXY_PREFERENCES } from './proxy.ts'
 import type { OpenAICodexProxyMode } from './proxy.ts'
 
@@ -231,6 +232,7 @@ export const Config: z<Config> = z.object({
  */
 export function apply(ctx: Context, config: Config): void {
   installOpenAICodexSearchEvent()
+  installLiveTpsProjection(ctx)
   const modelProvider = createOpenAICodexModelProvider((input, init) => service.proxy.fetch(input, init))
   const service = new OpenAICodexService({
     ...(config.credentialFile === undefined ? {} : { credentialFile: config.credentialFile }),

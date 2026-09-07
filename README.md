@@ -29,6 +29,14 @@ The **LLM Usage** surface counts tokens returned by DSH's normalized stream for 
 OpenAI Codex account quota remains available separately on the account page and through `/codex usage`; it is not mixed into session token analytics.
 
 
+## Live decode throughput (TPS)
+
+This source build integrates the former standalone `dsh-live-tps` host projection. It registers `liveTps` (state version 1) when the optional `sessionProjections` service is available; hosts without that service keep working. The existing Web usage HUD still shows TPS at the end of its model/token row in the conversation input area, and hides stale readings after about five seconds. HUD visibility settings and model/data availability still apply; no UI position changes are required.
+
+The provider-neutral fold uses non-empty text, reasoning, and tool-call deltas, estimates streamed tokens as `ceil(chars / 4)`, and publishes after more than 500 ms from the first token. At message close it prefers valid provider `outputTokens`, summing only decode spans across steps (not tool wait or first-token latency). Turn end clears the accumulator but preserves `{ tps, updatedAt }` for client-side fade. This is decode throughput, not an account-quota or billing metric.
+
+**Migration:** fully disable/unload standalone `dsh-live-tps` before loading/reloading this integrated build, and remove its persistent profile entry so it cannot return on restart. Both own the same key; overlapping registrations retain the first definition until all references are released. Preserve existing projection caches: the wire shape and state version are unchanged. The older release archives linked below are not a claim that this source integration is already published.
+
 ## Multiple accounts
 
 Use **Settings → OpenAI Codex → Accounts** in DSH to add a named account, then complete browser or device-code login using the existing controls. The existing login remains the default account. Select the account to use, rename it, or sign out of that account without replacing another account's credentials.
